@@ -10,6 +10,10 @@ This document tracks which NodePing API features are implemented in the CLI vs w
 - ✅ **Bulk Delete** - Delete multiple checks by filter (`checks delete --filter`)
 - ✅ **Filter/Search** - Regex filtering on label, target, type
 - ✅ **Subaccount Support** - All check operations support `--account` flag
+- ✅ **POST /checks** - Create new checks (`checks create`)
+- ✅ **PUT /checks/{id}** - Update existing checks (`checks update`)
+- ✅ **Enable/Disable** - Toggle checks (`checks enable/disable`)
+- ✅ **Rename** - Update check labels (`checks rename`)
 
 ### Results
 - ✅ **GET /results/{id}** - Get check results (`results <id>`)
@@ -31,15 +35,14 @@ This document tracks which NodePing API features are implemented in the CLI vs w
 
 ## Not Yet Implemented 🚧
 
-### Check Creation & Updates
-- ⏳ **POST /checks** - Create new checks
-- ⏳ **PUT /checks/{id}** - Update existing checks
-- ⏳ **Check Type Support** - HTTP, PING, PORT, SSL, DNS, AGENT, PUSH, AUDIO, etc.
+### Check Type Coverage
+- 🟡 **Core Types** - HTTP and AUDIO supported via CLI options
+- ⏳ **Extended Types** - PING, PORT, SSL, DNS, AGENT, PUSH, etc.
 
 ### Check Configuration
-- ⏳ **Enable/Disable** - Toggle checks without deletion
-- ⏳ **Rename** - Update check labels
-- ⏳ **Interval Changes** - Modify check frequency
+- ✅ **Enable/Disable** - Toggle checks without deletion
+- ✅ **Rename** - Update check labels
+- ✅ **Interval Changes** - Modify check frequency
 - ⏳ **Notification Settings** - Manage alert configurations
 - ⏳ **Run Locations** - Configure monitoring regions
 
@@ -66,21 +69,16 @@ This document tracks which NodePing API features are implemented in the CLI vs w
 
 ## API Coverage Statistics
 
-- **Implemented Endpoints**: 4 (GET /checks, DELETE /checks, GET /results, GET /accounts)
+- **Implemented Endpoints**: 6 (GET /checks, POST /checks, PUT /checks, DELETE /checks, GET /results, GET /accounts)
 - **Available Endpoints**: ~30+ (full NodePing API)
 - **Coverage**: ~13% of full API
 
 ## Implementation Priority (Future)
 
 ### High Priority
-1. **Check Creation** (POST /checks) - Enable full automation workflows
-2. **Check Updates** (PUT /checks) - Modify existing checks
-3. **Enable/Disable** - Non-destructive check management
-
-### Medium Priority
-4. **Contact Management** - Notification configuration
-5. **Check Groups** - Organization features
-6. **Maintenance Windows** - Scheduled pauses
+1. **Contact Management** - Notification configuration
+2. **Check Groups** - Organization features
+3. **Maintenance Windows** - Scheduled pauses
 
 ### Low Priority
 7. **Reports** - Uptime reporting
@@ -89,14 +87,15 @@ This document tracks which NodePing API features are implemented in the CLI vs w
 ## Use Case Coverage
 
 ### Fully Supported ✅
+- **Check Lifecycle Management** - Create, update, enable/disable, rename, delete
 - **Bulk Cleanup Operations** - Delete multiple checks (e.g., SR station shutdown)
 - **Check Auditing** - List and filter existing checks
 - **Multi-Account Management** - Subaccount support
 - **Results Monitoring** - View check status and history
 
 ### Partially Supported 🟡
-- **Infrastructure Deployment** - Can view/delete but not create checks
-- **Check Configuration** - Can view but not modify settings
+- **Infrastructure Deployment** - Core HTTP/AUDIO types supported
+- **Check Configuration** - Advanced fields not yet exposed in CLI
 
 ### Not Supported ⏳
 - **Full Lifecycle Management** - Create → Configure → Monitor → Update → Delete
@@ -125,7 +124,8 @@ This document tracks which NodePing API features are implemented in the CLI vs w
 
 ## Conclusion
 
-The NodePing CLI v1.1.0 provides **production-ready** support for:
+The NodePing CLI v1.2.0 provides **production-ready** support for:
+- Check lifecycle management (create, update, enable/disable, rename, delete)
 - Check listing and filtering
 - Bulk deletion operations
 - Results monitoring
@@ -136,10 +136,8 @@ It is **purpose-built** for operational use cases like:
 - Check auditing and reporting
 - Multi-account monitoring
 
-For **full lifecycle management** (create, update, enable/disable), the web UI or raw API calls are currently required. Future versions will expand coverage.
-
 ---
 
 **Last Updated**: 2026-02-22
-**CLI Version**: 1.1.0
+**CLI Version**: 1.2.0
 **API Version**: NodePing API v1

@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-02-22
+
+### Added
+- **Write operations**: `checks create`, `checks update`, `checks enable/disable`, and `checks rename`
+- **Sync workflow**: `sync plan` and `sync apply` for desired-state management
+- **Normalization engine**: target normalization for edge/origin endpoints and stream suffix variants
+- **Offline sync planning**: `--current` flag to plan against a local checks JSON file
+- **Extended tests**: sync plan determinism and normalization unit tests
+
+### Changed
+- CLI help and README updated to document write and sync operations
+
 ## [1.1.1] - 2026-02-22
 
 ### Fixed

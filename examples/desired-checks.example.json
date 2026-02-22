@@ -1,0 +1,26 @@
+{
+  "checks": [
+    {
+      "label": "Example Homepage",
+      "type": "HTTP",
+      "interval": 5,
+      "enable": "active",
+      "parameters": {
+        "target": "https://example.com",
+        "method": "GET",
+        "status": 200
+      }
+    },
+    {
+      "label": "Example Stream",
+      "type": "AUDIO",
+      "interval": 5,
+      "enable": "active",
+      "parameters": {
+        "target": "https://stream.example.com/live",
+        "threshold": 15,
+        "sensitivity": 3
+      }
+    }
+  ]
+}

@@ -19,7 +19,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
-const VERSION = '1.1.1';
+const VERSION = '1.2.0';
 const API_BASE = 'api.nodeping.com';
 const API_VERSION = '/api/1';
 
@@ -131,6 +131,216 @@ function apiRequest(method, endpoint, data = null, accountId = null) {
   });
 }
 
+function parseCliOptions(args, baseOptions = {}) {
+  const optionSpecs = {
+    '--filter': { key: 'filter', hasValue: true },
+    '--dry-run': { key: 'dryRun', hasValue: false },
+    '--force': { key: 'force', hasValue: false },
+    '--json': { key: 'json', hasValue: false },
+    '--limit': { key: 'limit', hasValue: true },
+    '--account': { key: 'account', hasValue: true },
+    '--desired': { key: 'desired', hasValue: true },
+    '--current': { key: 'current', hasValue: true },
+    '--normalize': { key: 'normalize', hasValue: false },
+    '--label': { key: 'label', hasValue: true },
+    '--type': { key: 'type', hasValue: true },
+    '--target': { key: 'target', hasValue: true },
+    '--interval': { key: 'interval', hasValue: true },
+    '--enable': { key: 'enableFlag', hasValue: false },
+    '--disable': { key: 'disableFlag', hasValue: false },
+    '--threshold': { key: 'threshold', hasValue: true },
+    '--sensitivity': { key: 'sensitivity', hasValue: true },
+    '--method': { key: 'method', hasValue: true },
+    '--status': { key: 'status', hasValue: true },
+    '--port': { key: 'port', hasValue: true },
+    '--param': { key: 'params', hasValue: true, multi: true }
+  };
+
+  const options = Object.assign({
+    filter: null,
+    dryRun: false,
+    force: false,
+    json: false,
+    limit: 10,
+    account: null,
+    desired: null,
+    current: null,
+    normalize: false,
+    label: null,
+    type: null,
+    target: null,
+    interval: null,
+    enableFlag: false,
+    disableFlag: false,
+    threshold: null,
+    sensitivity: null,
+    method: null,
+    status: null,
+    port: null,
+    params: []
+  }, baseOptions);
+
+  const positionals = [];
+
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (!arg.startsWith('--')) {
+      positionals.push(arg);
+      continue;
+    }
+
+    const [flag, inlineValue] = arg.split('=', 2);
+    const spec = optionSpecs[flag];
+    if (!spec) {
+      throw new Error(`Unknown option: ${flag}`);
+    }
+
+    if (spec.hasValue) {
+      let value = inlineValue;
+      if (value === undefined) {
+        value = args[i + 1];
+        if (value === undefined || value.startsWith('--')) {
+          throw new Error(`Missing value for ${flag}`);
+        }
+        i++;
+      }
+      if (spec.multi) {
+        options[spec.key].push(value);
+      } else {
+        options[spec.key] = value;
+      }
+    } else {
+      options[spec.key] = true;
+    }
+  }
+
+  return { options, positionals };
+}
+
+function normalizeEnable(value) {
+  if (value === undefined || value === null) return null;
+  if (typeof value === 'boolean') return value ? 'active' : 'inactive';
+  if (typeof value === 'number') return value === 1 ? 'active' : 'inactive';
+  const normalized = String(value).trim().toLowerCase();
+  if (['active', 'enabled', 'enable', 'true', '1', 'on'].includes(normalized)) return 'active';
+  if (['inactive', 'disabled', 'disable', 'false', '0', 'off'].includes(normalized)) return 'inactive';
+  return null;
+}
+
+function parseParamPairs(paramList) {
+  const params = {};
+  if (!Array.isArray(paramList)) return params;
+  for (const entry of paramList) {
+    const idx = entry.indexOf('=');
+    if (idx === -1) {
+      throw new Error(`Invalid --param "${entry}". Use key=value.`);
+    }
+    const key = entry.slice(0, idx).trim();
+    const value = entry.slice(idx + 1).trim();
+    if (!key) {
+      throw new Error(`Invalid --param "${entry}". Key is required.`);
+    }
+    params[key] = value;
+  }
+  return params;
+}
+
+function coerceUrlCandidate(value) {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const hasScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed);
+  const candidate = hasScheme ? trimmed : `https://${trimmed}`;
+  try {
+    return new URL(candidate);
+  } catch {
+    return null;
+  }
+}
+
+function normalizeStreamPath(pathname) {
+  let normalized = pathname.replace(/\/+$/, '');
+  if (normalized.endsWith('/playlist.m3u8')) {
+    normalized = normalized.slice(0, -'/playlist.m3u8'.length);
+  }
+  const suffixes = ['-icy', '-mp3'];
+  for (const suffix of suffixes) {
+    if (normalized.endsWith(suffix)) {
+      normalized = normalized.slice(0, -suffix.length);
+    }
+  }
+  normalized = normalized.replace(/\/+$/, '');
+  return normalized || '/';
+}
+
+function normalizeHostname(hostname) {
+  let normalized = hostname.toLowerCase();
+  if (normalized.startsWith('edge.')) {
+    normalized = `origin.${normalized.slice('edge.'.length)}`;
+  }
+  if (normalized.includes('.edge.')) {
+    normalized = normalized.replace('.edge.', '.origin.');
+  }
+  return normalized;
+}
+
+function normalizeUrl(value) {
+  const url = coerceUrlCandidate(value);
+  if (!url) return value.trim();
+
+  url.protocol = url.protocol.toLowerCase();
+  url.hostname = normalizeHostname(url.hostname);
+
+  if ((url.protocol === 'http:' && url.port === '80') || (url.protocol === 'https:' && url.port === '443')) {
+    url.port = '';
+  }
+
+  url.pathname = normalizeStreamPath(url.pathname);
+  url.hash = '';
+
+  const normalized = `${url.protocol}//${url.host}${url.pathname}${url.search}`;
+  return normalized.replace(/\/+$/, '');
+}
+
+function normalizeTarget(target) {
+  if (!target) return target;
+  return normalizeUrl(String(target));
+}
+
+function buildCheckPayloadFromOptions(options, isCreate = false) {
+  const payload = {};
+  if (options.label) payload.label = options.label;
+  if (options.type) payload.type = String(options.type).toUpperCase();
+  if (options.interval) payload.interval = parseInt(options.interval, 10);
+
+  const enableValue = options.enableFlag ? 'active' : options.disableFlag ? 'inactive' : null;
+  if (enableValue) payload.enable = enableValue;
+
+  const params = {};
+  if (options.target) params.target = options.target;
+  if (options.threshold !== null && options.threshold !== undefined) params.threshold = Number(options.threshold);
+  if (options.sensitivity !== null && options.sensitivity !== undefined) params.sensitivity = Number(options.sensitivity);
+  if (options.method) params.method = options.method.toUpperCase();
+  if (options.status) params.status = options.status;
+  if (options.port) params.port = Number(options.port);
+
+  const extraParams = parseParamPairs(options.params);
+  Object.assign(params, extraParams);
+
+  if (Object.keys(params).length > 0) {
+    payload.parameters = params;
+  }
+
+  if (isCreate) {
+    if (!payload.label) throw new Error('Missing required --label for check creation');
+    if (!payload.type) throw new Error('Missing required --type for check creation');
+    if (!payload.parameters || !payload.parameters.target) {
+      throw new Error('Missing required --target for check creation');
+    }
+  }
+
+  return payload;
+}
+
 // List all checks or filter by pattern
 async function listChecks(options = {}) {
   const checks = await apiRequest('GET', '/checks', null, options.account);
@@ -177,15 +387,42 @@ async function listChecks(options = {}) {
   return checkList;
 }
 
+async function createCheck(options = {}) {
+  const payload = buildCheckPayloadFromOptions(options, true);
+  const result = await apiRequest('POST', '/checks', payload, options.account);
+  return { payload, result };
+}
+
+async function updateCheck(checkId, options = {}) {
+  const payload = buildCheckPayloadFromOptions(options, false);
+  if (Object.keys(payload).length === 0) {
+    throw new Error('No update fields provided. Use --label, --interval, --enable/--disable, or parameter flags.');
+  }
+  const result = await apiRequest('PUT', `/checks/${checkId}`, payload, options.account);
+  return { payload, result };
+}
+
+async function renameCheck(checkId, newLabel, options = {}) {
+  const payload = { label: newLabel };
+  const result = await apiRequest('PUT', `/checks/${checkId}`, payload, options.account);
+  return { payload, result };
+}
+
+async function setCheckStatus(checkId, enableValue, options = {}) {
+  const payload = { enable: enableValue };
+  const result = await apiRequest('PUT', `/checks/${checkId}`, payload, options.account);
+  return { payload, result };
+}
+
 // Delete a single check
-async function deleteCheck(checkId, force = false) {
+async function deleteCheck(checkId, force = false, account = null) {
   if (!force) {
     console.error(`${colors.yellow}Warning:${colors.reset} Use --force to confirm deletion`);
     return false;
   }
   
   try {
-    const result = await apiRequest('DELETE', `/checks/${checkId}`);
+    const result = await apiRequest('DELETE', `/checks/${checkId}`, null, account);
     
     if (result.ok) {
       console.log(`${colors.green}✓${colors.reset} Deleted check: ${checkId}`);
@@ -234,7 +471,7 @@ async function bulkDelete(filter, options = {}) {
   let failed = 0;
   
   for (const check of checks) {
-    const success = await deleteCheck(check.id, true);
+    const success = await deleteCheck(check.id, true, options.account);
     if (success) {
       deleted++;
     } else {
@@ -288,7 +525,7 @@ async function listAccounts(options = {}) {
 // Get results for a check
 async function getResults(checkId, options = {}) {
   const limit = options.limit || 10;
-  const results = await apiRequest('GET', `/results/${checkId}?limit=${limit}`);
+  const results = await apiRequest('GET', `/results/${checkId}?limit=${limit}`, null, options.account);
   
   if (options.json) {
     console.log(JSON.stringify(results, null, 2));
@@ -320,6 +557,291 @@ async function getResults(checkId, options = {}) {
   });
 }
 
+function readJsonFile(filePath) {
+  const raw = fs.readFileSync(filePath, 'utf8');
+  return JSON.parse(raw);
+}
+
+function coerceCheckShape(check) {
+  const normalized = Object.assign({}, check);
+  if (!normalized.parameters) {
+    normalized.parameters = {};
+  }
+  if (normalized.target !== undefined && normalized.parameters.target === undefined) {
+    normalized.parameters.target = normalized.target;
+  }
+  if (normalized.threshold !== undefined && normalized.parameters.threshold === undefined) {
+    normalized.parameters.threshold = normalized.threshold;
+  }
+  if (normalized.sensitivity !== undefined && normalized.parameters.sensitivity === undefined) {
+    normalized.parameters.sensitivity = normalized.sensitivity;
+  }
+  if (normalized.method !== undefined && normalized.parameters.method === undefined) {
+    normalized.parameters.method = normalized.method;
+  }
+  if (normalized.status !== undefined && normalized.parameters.status === undefined) {
+    normalized.parameters.status = normalized.status;
+  }
+  if (normalized.port !== undefined && normalized.parameters.port === undefined) {
+    normalized.parameters.port = normalized.port;
+  }
+  return normalized;
+}
+
+function toCheckArray(data) {
+  if (!data) return [];
+  if (Array.isArray(data)) return data;
+  if (Array.isArray(data.checks)) return data.checks;
+  if (typeof data === 'object') {
+    return Object.entries(data).map(([id, check]) => ({ id, ...check }));
+  }
+  return [];
+}
+
+function normalizeComparableCheck(check, normalizeTargets) {
+  const base = coerceCheckShape(check);
+  const parameters = Object.assign({}, base.parameters);
+  if (normalizeTargets && parameters.target) {
+    parameters.target = normalizeTarget(parameters.target);
+  }
+  return {
+    id: base.id,
+    label: base.label ? String(base.label).trim() : '',
+    type: base.type ? String(base.type).toUpperCase() : '',
+    interval: base.interval !== undefined ? Number(base.interval) : null,
+    enable: normalizeEnable(base.enable ?? base.enabled ?? (base.disabled === true ? false : undefined)),
+    parameters
+  };
+}
+
+function buildCheckKey(check, normalizeTargets) {
+  const normalized = normalizeComparableCheck(check, normalizeTargets);
+  const label = normalized.label.toLowerCase();
+  const type = normalized.type;
+  const target = normalized.parameters?.target ? String(normalized.parameters.target).toLowerCase() : '';
+  return `${type}::${label}::${target}`;
+}
+
+function extractDesiredFields(check, normalizeTargets) {
+  const base = coerceCheckShape(check);
+  const fields = {};
+
+  if (Object.prototype.hasOwnProperty.call(base, 'label')) {
+    fields.label = base.label;
+  }
+  if (Object.prototype.hasOwnProperty.call(base, 'type')) {
+    fields.type = base.type ? String(base.type).toUpperCase() : base.type;
+  }
+  if (Object.prototype.hasOwnProperty.call(base, 'interval')) {
+    fields.interval = Number(base.interval);
+  }
+
+  const enableValue = normalizeEnable(base.enable ?? base.enabled ?? (base.disabled === true ? false : undefined));
+  if (enableValue !== null) {
+    fields.enable = enableValue;
+  } else if (
+    Object.prototype.hasOwnProperty.call(base, 'enable') ||
+    Object.prototype.hasOwnProperty.call(base, 'enabled') ||
+    Object.prototype.hasOwnProperty.call(base, 'disabled')
+  ) {
+    fields.enable = enableValue;
+  }
+
+  const params = {};
+  for (const key of ['target', 'threshold', 'sensitivity', 'method', 'status', 'port']) {
+    if (Object.prototype.hasOwnProperty.call(base.parameters, key)) {
+      let value = base.parameters[key];
+      if (key === 'target' && normalizeTargets) {
+        value = normalizeTarget(value);
+      }
+      if (key === 'method') {
+        value = String(value).toUpperCase();
+      }
+      params[key] = value;
+    }
+  }
+  if (Object.keys(params).length > 0) {
+    fields.parameters = params;
+  }
+
+  return fields;
+}
+
+function diffChecks(desiredFields, currentComparable) {
+  const changes = {};
+
+  if ('label' in desiredFields && desiredFields.label !== currentComparable.label) {
+    changes.label = desiredFields.label;
+  }
+  if ('type' in desiredFields && desiredFields.type !== currentComparable.type) {
+    changes.type = desiredFields.type;
+  }
+  if ('interval' in desiredFields && desiredFields.interval !== currentComparable.interval) {
+    changes.interval = desiredFields.interval;
+  }
+  if ('enable' in desiredFields && desiredFields.enable !== currentComparable.enable) {
+    changes.enable = desiredFields.enable;
+  }
+
+  if (desiredFields.parameters) {
+    const paramChanges = {};
+    for (const [key, value] of Object.entries(desiredFields.parameters)) {
+      const currentValue = currentComparable.parameters ? currentComparable.parameters[key] : undefined;
+      if (value !== currentValue) {
+        paramChanges[key] = value;
+      }
+    }
+    if (Object.keys(paramChanges).length > 0) {
+      changes.parameters = paramChanges;
+    }
+  }
+
+  return changes;
+}
+
+function buildPayloadFromDesiredCheck(check, normalizeTargets) {
+  const desired = extractDesiredFields(check, normalizeTargets);
+  const payload = {};
+  if ('label' in desired) payload.label = desired.label;
+  if ('type' in desired) payload.type = desired.type;
+  if ('interval' in desired) payload.interval = desired.interval;
+  if ('enable' in desired && desired.enable !== null) payload.enable = desired.enable;
+  if (desired.parameters) payload.parameters = desired.parameters;
+
+  if (!payload.label || !payload.type || !payload.parameters || !payload.parameters.target) {
+    throw new Error('Desired check entries must include label, type, and parameters.target');
+  }
+
+  return payload;
+}
+
+async function loadChecksForSync(options) {
+  if (options.current) {
+    return toCheckArray(readJsonFile(options.current));
+  }
+  return await listChecks({ json: true, account: options.account });
+}
+
+async function planSync(options) {
+  if (!options.desired) {
+    throw new Error('Missing --desired <file>');
+  }
+
+  const desiredRaw = readJsonFile(options.desired);
+  const desiredChecks = toCheckArray(desiredRaw).map(coerceCheckShape);
+  const currentChecks = await loadChecksForSync(options);
+
+  const currentById = new Map();
+  const currentByKey = new Map();
+
+  currentChecks.forEach((check) => {
+    if (check.id) currentById.set(check.id, check);
+    const key = buildCheckKey(check, options.normalize);
+    if (key && !currentByKey.has(key)) {
+      currentByKey.set(key, check);
+    }
+  });
+
+  const plan = {
+    create: [],
+    update: [],
+    disable: [],
+    delete: []
+  };
+
+  const matchedCurrentIds = new Set();
+
+  desiredChecks.forEach((desired) => {
+    if (!desired.label || !desired.type || !desired.parameters?.target) {
+      throw new Error('Each desired check must include label, type, and parameters.target');
+    }
+    const desiredId = desired.id;
+    let current = null;
+    if (desiredId && currentById.has(desiredId)) {
+      current = currentById.get(desiredId);
+    } else {
+      const key = buildCheckKey(desired, options.normalize);
+      if (currentByKey.has(key)) {
+        current = currentByKey.get(key);
+      }
+    }
+
+    if (!current) {
+      plan.create.push({ desired });
+      return;
+    }
+
+    matchedCurrentIds.add(current.id);
+    const desiredFields = extractDesiredFields(desired, options.normalize);
+    const currentComparable = normalizeComparableCheck(current, options.normalize);
+    const changes = diffChecks(desiredFields, currentComparable);
+
+    if ('enable' in desiredFields && desiredFields.enable === 'inactive' && currentComparable.enable !== 'inactive') {
+      if (changes.enable === 'inactive') {
+        delete changes.enable;
+      }
+      plan.disable.push({ id: current.id, label: current.label });
+    }
+
+    if (Object.keys(changes).length > 0) {
+      plan.update.push({ id: current.id, label: current.label, changes, desired });
+    }
+  });
+
+  currentChecks.forEach((current) => {
+    if (current.id && !matchedCurrentIds.has(current.id)) {
+      plan.delete.push({ id: current.id, label: current.label, type: current.type });
+    }
+  });
+
+  const sortByLabel = (a, b) => (String(a.label || '').localeCompare(String(b.label || '')));
+  plan.create.sort((a, b) => sortByLabel(a.desired, b.desired));
+  plan.update.sort(sortByLabel);
+  plan.disable.sort(sortByLabel);
+  plan.delete.sort(sortByLabel);
+
+  return plan;
+}
+
+async function applySync(options) {
+  if (!options.force) {
+    throw new Error('Add --force to apply changes');
+  }
+
+  const plan = await planSync(options);
+  const results = { created: [], updated: [], disabled: [], deleted: [] };
+
+  for (const entry of plan.create) {
+    const payload = buildPayloadFromDesiredCheck(entry.desired, options.normalize);
+    const result = await apiRequest('POST', '/checks', payload, options.account);
+    results.created.push({ payload, result });
+  }
+
+  for (const entry of plan.update) {
+    const payload = {};
+    if (entry.changes.label) payload.label = entry.changes.label;
+    if (entry.changes.type) payload.type = entry.changes.type;
+    if (entry.changes.interval !== undefined) payload.interval = entry.changes.interval;
+    if (entry.changes.enable) payload.enable = entry.changes.enable;
+    if (entry.changes.parameters) payload.parameters = entry.changes.parameters;
+
+    const result = await apiRequest('PUT', `/checks/${entry.id}`, payload, options.account);
+    results.updated.push({ id: entry.id, payload, result });
+  }
+
+  for (const entry of plan.disable) {
+    const result = await apiRequest('PUT', `/checks/${entry.id}`, { enable: 'inactive' }, options.account);
+    results.disabled.push({ id: entry.id, result });
+  }
+
+  for (const entry of plan.delete) {
+    const result = await apiRequest('DELETE', `/checks/${entry.id}`, null, options.account);
+    results.deleted.push({ id: entry.id, result });
+  }
+
+  return { plan, results };
+}
+
 // Print usage information
 function printUsage() {
   console.log(`${colors.bright}NodePing CLI v${VERSION}${colors.reset}
@@ -328,8 +850,15 @@ ${colors.bright}Usage:${colors.reset}
   nodeping checks list [--filter PATTERN] [--account ID] [--json]
   nodeping checks delete <id> [--force] [--account ID]
   nodeping checks delete --filter PATTERN [--dry-run] [--force] [--account ID]
+  nodeping checks create --type TYPE --label LABEL --target TARGET [options]
+  nodeping checks update <id> [options]
+  nodeping checks enable <id> [--account ID]
+  nodeping checks disable <id> [--account ID]
+  nodeping checks rename <id> <newLabel> [--account ID]
   nodeping accounts list [--json]
   nodeping results <check-id> [--limit N] [--json] [--account ID]
+  nodeping sync plan --desired <file> [--normalize] [--json] [--account ID]
+  nodeping sync apply --desired <file> [--normalize] --force [--account ID]
   nodeping --version
   nodeping --help
 
@@ -337,8 +866,15 @@ ${colors.bright}Commands:${colors.reset}
   ${colors.cyan}checks list${colors.reset}              List all monitoring checks
   ${colors.cyan}checks delete <id>${colors.reset}       Delete a specific check by ID
   ${colors.cyan}checks delete --filter${colors.reset}   Bulk delete checks matching pattern
+  ${colors.cyan}checks create${colors.reset}            Create a new check (HTTP, AUDIO)
+  ${colors.cyan}checks update <id>${colors.reset}       Update label/interval/params for a check
+  ${colors.cyan}checks enable <id>${colors.reset}       Enable a check
+  ${colors.cyan}checks disable <id>${colors.reset}      Disable a check
+  ${colors.cyan}checks rename <id>${colors.reset}       Rename a check label
   ${colors.cyan}accounts list${colors.reset}            List all subaccounts
   ${colors.cyan}results <id>${colors.reset}             Show recent results for a check
+  ${colors.cyan}sync plan${colors.reset}                Diff desired checks against current state
+  ${colors.cyan}sync apply${colors.reset}               Apply planned changes (requires --force)
 
 ${colors.bright}Options:${colors.reset}
   ${colors.cyan}--filter PATTERN${colors.reset}        Filter checks by label, target, or type (regex)
@@ -347,6 +883,21 @@ ${colors.bright}Options:${colors.reset}
   ${colors.cyan}--force${colors.reset}                 Confirm deletion (required for delete operations)
   ${colors.cyan}--json${colors.reset}                  Output in JSON format
   ${colors.cyan}--limit N${colors.reset}               Limit number of results (default: 10)
+  ${colors.cyan}--label LABEL${colors.reset}           Check label (create/update)
+  ${colors.cyan}--type TYPE${colors.reset}             Check type (HTTP, AUDIO, etc.)
+  ${colors.cyan}--target TARGET${colors.reset}         Check target (URL/host)
+  ${colors.cyan}--interval N${colors.reset}            Check interval in minutes
+  ${colors.cyan}--enable${colors.reset}                Enable a check (create/update)
+  ${colors.cyan}--disable${colors.reset}               Disable a check (create/update)
+  ${colors.cyan}--threshold N${colors.reset}           AUDIO threshold parameter
+  ${colors.cyan}--sensitivity N${colors.reset}         AUDIO sensitivity parameter
+  ${colors.cyan}--method METHOD${colors.reset}         HTTP method (GET, HEAD)
+  ${colors.cyan}--status CODE${colors.reset}           HTTP expected status code
+  ${colors.cyan}--port N${colors.reset}                Port override for target
+  ${colors.cyan}--param key=value${colors.reset}       Extra parameter (repeatable)
+  ${colors.cyan}--desired FILE${colors.reset}          Desired checks JSON for sync
+  ${colors.cyan}--current FILE${colors.reset}          Current checks JSON (offline sync)
+  ${colors.cyan}--normalize${colors.reset}             Normalize targets for sync comparison
   ${colors.cyan}--version${colors.reset}               Show version number
   ${colors.cyan}--help${colors.reset}                  Show this help message
 
@@ -378,6 +929,21 @@ ${colors.bright}Examples:${colors.reset}
 
   ${colors.gray}# Get recent results${colors.reset}
   nodeping results 201205050153W2Q4C-0J2HSIRF --limit 5
+
+  ${colors.gray}# Create an HTTP check${colors.reset}
+  nodeping checks create --type HTTP --label "Homepage" --target https://example.com --interval 5
+
+  ${colors.gray}# Create an AUDIO check${colors.reset}
+  nodeping checks create --type AUDIO --label "Stream" --target https://stream.example.com/live --interval 5 --threshold 15 --sensitivity 3
+
+  ${colors.gray}# Update a check label and interval${colors.reset}
+  nodeping checks update 201205050153W2Q4C-0J2HSIRF --label "New Label" --interval 10
+
+  ${colors.gray}# Sync plan from desired state${colors.reset}
+  nodeping sync plan --desired examples/desired-checks.example.json --normalize
+
+  ${colors.gray}# Apply sync changes (requires --force)${colors.reset}
+  nodeping sync apply --desired examples/desired-checks.example.json --normalize --force
 `);
 }
 
@@ -398,58 +964,167 @@ async function main() {
   const command = args[0];
   const subcommand = args[1];
   
-  // Parse options
-  const options = {
-    filter: null,
-    dryRun: false,
-    force: false,
-    json: false,
-    limit: 10,
-    account: null
-  };
-  
-  for (let i = 2; i < args.length; i++) {
-    if (args[i] === '--filter' && args[i + 1]) {
-      options.filter = args[i + 1];
-      i++;
-    } else if (args[i] === '--dry-run') {
-      options.dryRun = true;
-    } else if (args[i] === '--force') {
-      options.force = true;
-    } else if (args[i] === '--json') {
-      options.json = true;
-    } else if (args[i] === '--limit' && args[i + 1]) {
-      options.limit = parseInt(args[i + 1], 10);
-      i++;
-    } else if (args[i] === '--account' && args[i + 1]) {
-      options.account = args[i + 1];
-      i++;
-    }
-  }
-  
   try {
     if (command === 'checks' && subcommand === 'list') {
+      const { options } = parseCliOptions(args.slice(2));
       await listChecks(options);
     } else if (command === 'checks' && subcommand === 'delete') {
-      const checkId = args[2];
-      
+      const { options, positionals } = parseCliOptions(args.slice(2));
+      const checkId = positionals[0];
+
       if (options.filter) {
         await bulkDelete(options.filter, options);
       } else if (checkId && !checkId.startsWith('--')) {
-        await deleteCheck(checkId, options.force);
+        await deleteCheck(checkId, options.force, options.account);
       } else {
         console.error(`${colors.red}Error:${colors.reset} Specify a check ID or use --filter for bulk deletion`);
         process.exit(1);
       }
+    } else if (command === 'checks' && subcommand === 'create') {
+      const { options } = parseCliOptions(args.slice(2));
+      const result = await createCheck(options);
+      if (options.json) {
+        console.log(JSON.stringify(result, null, 2));
+      } else {
+        console.log(`${colors.green}✓${colors.reset} Created check`);
+        console.log(`  Label: ${result.payload.label}`);
+        console.log(`  Type: ${result.payload.type}`);
+        if (result.payload.parameters?.target) {
+          console.log(`  Target: ${result.payload.parameters.target}`);
+        }
+      }
+    } else if (command === 'checks' && subcommand === 'update') {
+      const { options, positionals } = parseCliOptions(args.slice(2));
+      const checkId = positionals[0];
+      if (!checkId) {
+        console.error(`${colors.red}Error:${colors.reset} Specify a check ID to update`);
+        process.exit(1);
+      }
+      const result = await updateCheck(checkId, options);
+      if (options.json) {
+        console.log(JSON.stringify({ id: checkId, ...result }, null, 2));
+      } else {
+        console.log(`${colors.green}✓${colors.reset} Updated check: ${checkId}`);
+      }
+    } else if (command === 'checks' && subcommand === 'rename') {
+      const { options, positionals } = parseCliOptions(args.slice(2));
+      const checkId = positionals[0];
+      const newLabel = positionals[1];
+      if (!checkId || !newLabel) {
+        console.error(`${colors.red}Error:${colors.reset} Usage: nodeping checks rename <id> <newLabel>`);
+        process.exit(1);
+      }
+      const result = await renameCheck(checkId, newLabel, options);
+      if (options.json) {
+        console.log(JSON.stringify({ id: checkId, ...result }, null, 2));
+      } else {
+        console.log(`${colors.green}✓${colors.reset} Renamed check: ${checkId}`);
+        console.log(`  New label: ${newLabel}`);
+      }
+    } else if (command === 'checks' && subcommand === 'enable') {
+      const { options, positionals } = parseCliOptions(args.slice(2));
+      const checkId = positionals[0];
+      if (!checkId) {
+        console.error(`${colors.red}Error:${colors.reset} Specify a check ID to enable`);
+        process.exit(1);
+      }
+      const result = await setCheckStatus(checkId, 'active', options);
+      if (options.json) {
+        console.log(JSON.stringify({ id: checkId, ...result }, null, 2));
+      } else {
+        console.log(`${colors.green}✓${colors.reset} Enabled check: ${checkId}`);
+      }
+    } else if (command === 'checks' && subcommand === 'disable') {
+      const { options, positionals } = parseCliOptions(args.slice(2));
+      const checkId = positionals[0];
+      if (!checkId) {
+        console.error(`${colors.red}Error:${colors.reset} Specify a check ID to disable`);
+        process.exit(1);
+      }
+      const result = await setCheckStatus(checkId, 'inactive', options);
+      if (options.json) {
+        console.log(JSON.stringify({ id: checkId, ...result }, null, 2));
+      } else {
+        console.log(`${colors.green}✓${colors.reset} Disabled check: ${checkId}`);
+      }
     } else if (command === 'accounts' && subcommand === 'list') {
+      const { options } = parseCliOptions(args.slice(2));
       await listAccounts(options);
     } else if (command === 'results') {
-      const checkId = args[1];
-      if (!checkId || checkId.startsWith('--')) {
+      const { options, positionals } = parseCliOptions(args.slice(1));
+      const checkId = positionals[0];
+      if (!checkId) {
         console.error(`${colors.red}Error:${colors.reset} Specify a check ID`);
         process.exit(1);
       }
       await getResults(checkId, options);
+    } else if (command === 'sync' && (subcommand === 'plan' || subcommand === 'apply')) {
+      const { options } = parseCliOptions(args.slice(2));
+      if (subcommand === 'plan') {
+        const plan = await planSync(options);
+        if (options.json) {
+          console.log(JSON.stringify({
+            summary: {
+              create: plan.create.length,
+              update: plan.update.length,
+              disable: plan.disable.length,
+              delete: plan.delete.length
+            },
+            plan
+          }, null, 2));
+        } else {
+          console.log(`${colors.bright}Sync plan${colors.reset}`);
+          console.log(`  Create: ${plan.create.length}`);
+          console.log(`  Update: ${plan.update.length}`);
+          console.log(`  Disable: ${plan.disable.length}`);
+          console.log(`  Delete: ${plan.delete.length}\n`);
+
+          if (plan.create.length) {
+            console.log(`${colors.cyan}Create${colors.reset}`);
+            plan.create.forEach(entry => {
+              console.log(`  ${entry.desired.label} (${entry.desired.type})`);
+            });
+            console.log('');
+          }
+
+          if (plan.update.length) {
+            console.log(`${colors.cyan}Update${colors.reset}`);
+            plan.update.forEach(entry => {
+              const fields = Object.keys(entry.changes).join(', ');
+              console.log(`  ${entry.label} (${entry.id}) -> ${fields}`);
+            });
+            console.log('');
+          }
+
+          if (plan.disable.length) {
+            console.log(`${colors.cyan}Disable${colors.reset}`);
+            plan.disable.forEach(entry => {
+              console.log(`  ${entry.label} (${entry.id})`);
+            });
+            console.log('');
+          }
+
+          if (plan.delete.length) {
+            console.log(`${colors.cyan}Delete${colors.reset}`);
+            plan.delete.forEach(entry => {
+              console.log(`  ${entry.label} (${entry.id})`);
+            });
+            console.log('');
+          }
+        }
+      } else {
+        const result = await applySync(options);
+        if (options.json) {
+          console.log(JSON.stringify(result, null, 2));
+        } else {
+          const summary = result.plan;
+          console.log(`${colors.bright}Sync applied${colors.reset}`);
+          console.log(`  Created: ${summary.create.length}`);
+          console.log(`  Updated: ${summary.update.length}`);
+          console.log(`  Disabled: ${summary.disable.length}`);
+          console.log(`  Deleted: ${summary.delete.length}`);
+        }
+      }
     } else {
       console.error(`${colors.red}Error:${colors.reset} Unknown command: ${command} ${subcommand || ''}`);
       console.error(`Run ${colors.cyan}nodeping --help${colors.reset} for usage information`);
@@ -462,4 +1137,15 @@ async function main() {
 }
 
 // Run the CLI
-main();
+if (require.main === module) {
+  main();
+}
+
+module.exports = {
+  normalizeTarget,
+  normalizeUrl,
+  normalizeHostname,
+  normalizeStreamPath,
+  buildCheckKey,
+  normalizeComparableCheck
+};

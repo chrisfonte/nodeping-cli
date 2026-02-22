@@ -7,6 +7,8 @@ A command-line interface for the [NodePing](https://nodeping.com) monitoring API
 - ✅ List all monitoring checks with filtering
 - ✅ Subaccount support for multi-account management
 - ✅ Delete single or bulk checks with safety guards
+- ✅ Create, update, enable/disable, and rename checks
+- ✅ Desired-state sync with plan/apply workflow
 - ✅ Dry-run mode for safe bulk operations
 - ✅ View recent check results with detailed status
 - ✅ JSON output mode for scripting and automation
@@ -75,6 +77,39 @@ nodeping checks list --filter "example.com"
 nodeping checks delete 201205050153W2Q4C-0J2HSIRF --force
 ```
 
+### Create Checks
+
+```bash
+# Create an HTTP check
+nodeping checks create --type HTTP --label "Homepage" --target https://example.com --interval 5
+
+# Create an AUDIO check
+nodeping checks create --type AUDIO --label "Stream" --target https://stream.example.com/live --interval 5 --threshold 15 --sensitivity 3
+```
+
+### Update Checks
+
+```bash
+# Update label and interval
+nodeping checks update 201205050153W2Q4C-0J2HSIRF --label "New Label" --interval 10
+
+# Update target parameters
+nodeping checks update 201205050153W2Q4C-0J2HSIRF --target https://example.com/health --method GET --status 200
+```
+
+### Enable/Disable Checks
+
+```bash
+nodeping checks enable 201205050153W2Q4C-0J2HSIRF
+nodeping checks disable 201205050153W2Q4C-0J2HSIRF
+```
+
+### Rename Checks
+
+```bash
+nodeping checks rename 201205050153W2Q4C-0J2HSIRF "Station East"
+```
+
 ### Bulk Delete Checks
 
 ```bash
@@ -96,6 +131,34 @@ nodeping results 201205050153W2Q4C-0J2HSIRF --limit 25
 
 # Get results in JSON format
 nodeping results 201205050153W2Q4C-0J2HSIRF --json
+```
+
+### Desired-State Sync
+
+```bash
+# Plan changes against a desired JSON file
+nodeping sync plan --desired examples/desired-checks.example.json --normalize
+
+# Apply the plan (requires --force)
+nodeping sync apply --desired examples/desired-checks.example.json --normalize --force
+```
+
+Desired files support the shape:
+
+```json
+{
+  "checks": [
+    {
+      "label": "Homepage",
+      "type": "HTTP",
+      "interval": 5,
+      "enable": "active",
+      "parameters": {
+        "target": "https://example.com"
+      }
+    }
+  ]
+}
 ```
 
 ### Subaccount Management
@@ -143,6 +206,60 @@ Bulk delete checks matching a filter pattern.
 - `--force` — Confirm deletion (required for execution)
 - `--account ID` — Delete checks from a specific subaccount
 
+### `nodeping checks create [options]`
+
+Create a new check. At minimum provide `--type`, `--label`, and `--target`.
+
+**Options:**
+- `--type TYPE` — Check type (HTTP, AUDIO, etc.)
+- `--label LABEL` — Check label
+- `--target TARGET` — Target URL or host
+- `--interval N` — Check interval in minutes
+- `--enable` / `--disable` — Initial enable state
+- `--threshold N` — AUDIO threshold parameter
+- `--sensitivity N` — AUDIO sensitivity parameter
+- `--method METHOD` — HTTP method (GET, HEAD)
+- `--status CODE` — Expected HTTP status code
+- `--param key=value` — Extra parameter (repeatable)
+- `--account ID` — Create the check in a specific subaccount
+
+### `nodeping checks update <id> [options]`
+
+Update an existing check.
+
+**Options:**
+- `--label LABEL` — Update label
+- `--interval N` — Update interval
+- `--enable` / `--disable` — Update enable state
+- `--target TARGET` — Update target
+- `--threshold N` — AUDIO threshold parameter
+- `--sensitivity N` — AUDIO sensitivity parameter
+- `--method METHOD` — HTTP method (GET, HEAD)
+- `--status CODE` — Expected HTTP status code
+- `--param key=value` — Extra parameter (repeatable)
+- `--account ID` — Update a check in a specific subaccount
+
+### `nodeping checks enable <id> [options]`
+
+Enable a check without modifying other parameters.
+
+**Options:**
+- `--account ID` — Enable a check in a specific subaccount
+
+### `nodeping checks disable <id> [options]`
+
+Disable a check without deleting it.
+
+**Options:**
+- `--account ID` — Disable a check in a specific subaccount
+
+### `nodeping checks rename <id> <newLabel> [options]`
+
+Rename a check label.
+
+**Options:**
+- `--account ID` — Rename a check in a specific subaccount
+
 ### `nodeping accounts list [options]`
 
 List all subaccounts.
@@ -158,6 +275,27 @@ Show recent results for a specific check.
 - `--limit N` — Number of results to show (default: 10)
 - `--account ID` — Get results for a check on a specific subaccount
 - `--json` — Output in JSON format
+
+### `nodeping sync plan [options]`
+
+Compare a desired checks file against current checks and output a plan.
+
+**Options:**
+- `--desired FILE` — Desired checks JSON file
+- `--normalize` — Normalize targets before comparison
+- `--current FILE` — Use a local current checks JSON file (offline)
+- `--account ID` — Plan against a specific subaccount
+- `--json` — Output the plan in JSON format
+
+### `nodeping sync apply [options]`
+
+Apply changes from a desired checks file (requires `--force`).
+
+**Options:**
+- `--desired FILE` — Desired checks JSON file
+- `--normalize` — Normalize targets before comparison
+- `--account ID` — Apply against a specific subaccount
+- `--force` — Confirm apply (required)
 
 ## Use Case: SR Station Shutdown
 
@@ -199,6 +337,17 @@ This CLI wraps the NodePing REST API. For more details on the API:
 - Store credentials in `~/.credentials/nodeping/api_token` (gitignored)
 - Use limited-access tokens when possible
 - Review deletions with `--dry-run` before using `--force`
+- `sync apply` will delete checks that are not present in the desired file; always run `sync plan` first
+
+## Normalization Notes
+
+When `--normalize` is enabled, the sync logic:
+
+- Treats edge and origin endpoints as equivalent by normalizing edge hosts to origin.
+- Collapses stream suffix variants (`-icy`, `-mp3`, `/playlist.m3u8`) to a canonical target.
+- Strips trailing slashes and normalizes default ports.
+
+If you rely on distinct edge vs origin targets or suffix-specific endpoints, omit `--normalize`.
 
 ## Development
 
@@ -215,8 +364,10 @@ The CLI is designed as a single-file Node.js script with zero external dependenc
 - [x] Delete single check
 - [x] Bulk delete with dry-run
 - [x] View check results
-- [ ] Create new checks
-- [ ] Update check configuration
+- [x] Create new checks
+- [x] Update check configuration
+- [x] Enable/disable/rename checks
+- [x] Desired-state sync (plan/apply)
 - [ ] Manage contacts and contact groups
 - [ ] Interactive mode for bulk operations
 
