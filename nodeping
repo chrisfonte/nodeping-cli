@@ -1,0 +1,384 @@
+#!/usr/bin/env node
+
+/**
+ * NodePing CLI
+ * A command-line interface for the NodePing monitoring API
+ * 
+ * Usage:
+ *   nodeping checks list [--filter PATTERN] [--json]
+ *   nodeping checks delete <id> [--force]
+ *   nodeping checks delete --filter PATTERN [--dry-run] [--force]
+ *   nodeping results <check-id> [--limit N]
+ * 
+ * Authentication:
+ *   Reads API token from ~/.credentials/nodeping/api_token
+ */
+
+const https = require('https');
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+
+const VERSION = '1.0.0';
+const API_BASE = 'api.nodeping.com';
+const API_VERSION = '/api/1';
+
+// ANSI color codes
+const colors = {
+  reset: '\x1b[0m',
+  bright: '\x1b[1m',
+  dim: '\x1b[2m',
+  red: '\x1b[31m',
+  green: '\x1b[32m',
+  yellow: '\x1b[33m',
+  blue: '\x1b[34m',
+  cyan: '\x1b[36m',
+  gray: '\x1b[90m'
+};
+
+// Read API token from credentials file
+function getApiToken() {
+  const tokenPath = path.join(os.homedir(), '.credentials', 'nodeping', 'api_token');
+  
+  try {
+    const token = fs.readFileSync(tokenPath, 'utf8').trim();
+    if (!token) {
+      throw new Error('Token file is empty');
+    }
+    return token;
+  } catch (err) {
+    console.error(`${colors.red}Error:${colors.reset} Could not read API token from ${tokenPath}`);
+    console.error(`${colors.gray}Create the file with: mkdir -p ~/.credentials/nodeping && echo "YOUR_TOKEN" > ~/.credentials/nodeping/api_token${colors.reset}`);
+    process.exit(1);
+  }
+}
+
+// Make HTTP request to NodePing API
+function apiRequest(method, endpoint, data = null) {
+  return new Promise((resolve, reject) => {
+    const token = getApiToken();
+    
+    const options = {
+      hostname: API_BASE,
+      path: `${API_VERSION}${endpoint}${endpoint.includes('?') ? '&' : '?'}token=${token}`,
+      method: method,
+      headers: {
+        'Accept': 'application/json'
+      }
+    };
+    
+    if (data && method !== 'GET') {
+      const postData = JSON.stringify({ json: data });
+      options.headers['Content-Type'] = 'application/x-www-form-urlencoded';
+      options.headers['Content-Length'] = Buffer.byteLength(postData);
+    }
+    
+    const req = https.request(options, (res) => {
+      let responseData = '';
+      
+      res.on('data', (chunk) => {
+        responseData += chunk;
+      });
+      
+      res.on('end', () => {
+        try {
+          const parsed = JSON.parse(responseData);
+          
+          if (res.statusCode >= 400) {
+            reject(new Error(parsed.error || `HTTP ${res.statusCode}`));
+          } else {
+            resolve(parsed);
+          }
+        } catch (err) {
+          reject(new Error(`Failed to parse response: ${err.message}`));
+        }
+      });
+    });
+    
+    req.on('error', (err) => {
+      reject(err);
+    });
+    
+    if (data && method !== 'GET') {
+      req.write(`json=${encodeURIComponent(JSON.stringify(data))}`);
+    }
+    
+    req.end();
+  });
+}
+
+// List all checks or filter by pattern
+async function listChecks(options = {}) {
+  const checks = await apiRequest('GET', '/checks');
+  
+  let checkList = Object.entries(checks).map(([id, check]) => ({
+    id,
+    ...check
+  }));
+  
+  // Apply filter if provided
+  if (options.filter) {
+    const pattern = new RegExp(options.filter, 'i');
+    checkList = checkList.filter(check => 
+      pattern.test(check.label) || 
+      pattern.test(check.parameters?.target || '') ||
+      pattern.test(check.type)
+    );
+  }
+  
+  if (options.json) {
+    console.log(JSON.stringify(checkList, null, 2));
+    return checkList;
+  }
+  
+  // Human-readable output
+  console.log(`${colors.bright}${checkList.length} check(s) found${colors.reset}\n`);
+  
+  checkList.forEach(check => {
+    const status = check.state === 1 ? `${colors.green}PASS${colors.reset}` : `${colors.red}FAIL${colors.reset}`;
+    const enabled = check.enable === 'active' ? `${colors.green}enabled${colors.reset}` : `${colors.gray}disabled${colors.reset}`;
+    
+    console.log(`${colors.cyan}${check.id}${colors.reset}`);
+    console.log(`  Label: ${colors.bright}${check.label}${colors.reset}`);
+    console.log(`  Type: ${check.type}`);
+    if (check.parameters?.target) {
+      console.log(`  Target: ${check.parameters.target}`);
+    }
+    console.log(`  Status: ${status} | ${enabled}`);
+    console.log(`  Interval: ${check.interval} min`);
+    console.log('');
+  });
+  
+  return checkList;
+}
+
+// Delete a single check
+async function deleteCheck(checkId, force = false) {
+  if (!force) {
+    console.error(`${colors.yellow}Warning:${colors.reset} Use --force to confirm deletion`);
+    return false;
+  }
+  
+  try {
+    const result = await apiRequest('DELETE', `/checks/${checkId}`);
+    
+    if (result.ok) {
+      console.log(`${colors.green}✓${colors.reset} Deleted check: ${checkId}`);
+      return true;
+    } else {
+      console.error(`${colors.red}✗${colors.reset} Failed to delete: ${checkId}`);
+      return false;
+    }
+  } catch (err) {
+    console.error(`${colors.red}Error:${colors.reset} ${err.message}`);
+    return false;
+  }
+}
+
+// Bulk delete checks by filter pattern
+async function bulkDelete(filter, options = {}) {
+  const checks = await listChecks({ filter, json: true });
+  
+  if (checks.length === 0) {
+    console.log(`${colors.yellow}No checks found matching filter: ${filter}${colors.reset}`);
+    return;
+  }
+  
+  console.log(`${colors.bright}Found ${checks.length} check(s) matching "${filter}"${colors.reset}\n`);
+  
+  // Show what will be deleted
+  checks.forEach(check => {
+    console.log(`  ${colors.cyan}${check.id}${colors.reset} - ${check.label} (${check.type})`);
+  });
+  
+  console.log('');
+  
+  if (options.dryRun) {
+    console.log(`${colors.yellow}DRY RUN:${colors.reset} Would delete ${checks.length} check(s)`);
+    console.log(`${colors.gray}Remove --dry-run and add --force to execute deletion${colors.reset}`);
+    return;
+  }
+  
+  if (!options.force) {
+    console.error(`${colors.red}Error:${colors.reset} Add --force to confirm bulk deletion of ${checks.length} check(s)`);
+    process.exit(1);
+  }
+  
+  // Perform deletions
+  let deleted = 0;
+  let failed = 0;
+  
+  for (const check of checks) {
+    const success = await deleteCheck(check.id, true);
+    if (success) {
+      deleted++;
+    } else {
+      failed++;
+    }
+  }
+  
+  console.log('');
+  console.log(`${colors.bright}Summary:${colors.reset}`);
+  console.log(`  ${colors.green}Deleted: ${deleted}${colors.reset}`);
+  if (failed > 0) {
+    console.log(`  ${colors.red}Failed: ${failed}${colors.reset}`);
+  }
+}
+
+// Get results for a check
+async function getResults(checkId, options = {}) {
+  const limit = options.limit || 10;
+  const results = await apiRequest('GET', `/results/${checkId}?limit=${limit}`);
+  
+  if (options.json) {
+    console.log(JSON.stringify(results, null, 2));
+    return;
+  }
+  
+  // Human-readable output
+  const resultList = Array.isArray(results) ? results : [results];
+  
+  console.log(`${colors.bright}Last ${resultList.length} result(s) for ${checkId}${colors.reset}\n`);
+  
+  resultList.forEach(result => {
+    const status = result.su ? `${colors.green}SUCCESS${colors.reset}` : `${colors.red}FAILURE${colors.reset}`;
+    const date = new Date(result.t);
+    
+    console.log(`${colors.cyan}${date.toISOString()}${colors.reset}`);
+    console.log(`  Status: ${status}`);
+    console.log(`  Runtime: ${result.rt}ms`);
+    if (result.m) {
+      console.log(`  Message: ${result.m}`);
+    }
+    console.log('');
+  });
+}
+
+// Print usage information
+function printUsage() {
+  console.log(`${colors.bright}NodePing CLI v${VERSION}${colors.reset}
+
+${colors.bright}Usage:${colors.reset}
+  nodeping checks list [--filter PATTERN] [--json]
+  nodeping checks delete <id> [--force]
+  nodeping checks delete --filter PATTERN [--dry-run] [--force]
+  nodeping results <check-id> [--limit N] [--json]
+  nodeping --version
+  nodeping --help
+
+${colors.bright}Commands:${colors.reset}
+  ${colors.cyan}checks list${colors.reset}              List all monitoring checks
+  ${colors.cyan}checks delete <id>${colors.reset}       Delete a specific check by ID
+  ${colors.cyan}checks delete --filter${colors.reset}   Bulk delete checks matching pattern
+  ${colors.cyan}results <id>${colors.reset}             Show recent results for a check
+
+${colors.bright}Options:${colors.reset}
+  ${colors.cyan}--filter PATTERN${colors.reset}        Filter checks by label, target, or type (regex)
+  ${colors.cyan}--dry-run${colors.reset}               Preview bulk deletion without executing
+  ${colors.cyan}--force${colors.reset}                 Confirm deletion (required for delete operations)
+  ${colors.cyan}--json${colors.reset}                  Output in JSON format
+  ${colors.cyan}--limit N${colors.reset}               Limit number of results (default: 10)
+  ${colors.cyan}--version${colors.reset}               Show version number
+  ${colors.cyan}--help${colors.reset}                  Show this help message
+
+${colors.bright}Authentication:${colors.reset}
+  API token must be stored in: ${colors.cyan}~/.credentials/nodeping/api_token${colors.reset}
+  Get your token from: ${colors.blue}https://nodeping.com/account.html${colors.reset}
+
+${colors.bright}Examples:${colors.reset}
+  ${colors.gray}# List all checks${colors.reset}
+  nodeping checks list
+
+  ${colors.gray}# List checks matching "SR"${colors.reset}
+  nodeping checks list --filter "SR"
+
+  ${colors.gray}# Preview bulk deletion${colors.reset}
+  nodeping checks delete --filter "SR" --dry-run
+
+  ${colors.gray}# Execute bulk deletion${colors.reset}
+  nodeping checks delete --filter "SR" --force
+
+  ${colors.gray}# Delete a single check${colors.reset}
+  nodeping checks delete 201205050153W2Q4C-0J2HSIRF --force
+
+  ${colors.gray}# Get recent results${colors.reset}
+  nodeping results 201205050153W2Q4C-0J2HSIRF --limit 5
+`);
+}
+
+// Main CLI router
+async function main() {
+  const args = process.argv.slice(2);
+  
+  if (args.length === 0 || args.includes('--help') || args.includes('-h')) {
+    printUsage();
+    process.exit(0);
+  }
+  
+  if (args.includes('--version') || args.includes('-v')) {
+    console.log(`nodeping v${VERSION}`);
+    process.exit(0);
+  }
+  
+  const command = args[0];
+  const subcommand = args[1];
+  
+  // Parse options
+  const options = {
+    filter: null,
+    dryRun: false,
+    force: false,
+    json: false,
+    limit: 10
+  };
+  
+  for (let i = 2; i < args.length; i++) {
+    if (args[i] === '--filter' && args[i + 1]) {
+      options.filter = args[i + 1];
+      i++;
+    } else if (args[i] === '--dry-run') {
+      options.dryRun = true;
+    } else if (args[i] === '--force') {
+      options.force = true;
+    } else if (args[i] === '--json') {
+      options.json = true;
+    } else if (args[i] === '--limit' && args[i + 1]) {
+      options.limit = parseInt(args[i + 1], 10);
+      i++;
+    }
+  }
+  
+  try {
+    if (command === 'checks' && subcommand === 'list') {
+      await listChecks(options);
+    } else if (command === 'checks' && subcommand === 'delete') {
+      const checkId = args[2];
+      
+      if (options.filter) {
+        await bulkDelete(options.filter, options);
+      } else if (checkId && !checkId.startsWith('--')) {
+        await deleteCheck(checkId, options.force);
+      } else {
+        console.error(`${colors.red}Error:${colors.reset} Specify a check ID or use --filter for bulk deletion`);
+        process.exit(1);
+      }
+    } else if (command === 'results') {
+      const checkId = args[1];
+      if (!checkId || checkId.startsWith('--')) {
+        console.error(`${colors.red}Error:${colors.reset} Specify a check ID`);
+        process.exit(1);
+      }
+      await getResults(checkId, options);
+    } else {
+      console.error(`${colors.red}Error:${colors.reset} Unknown command: ${command} ${subcommand}`);
+      console.error(`Run ${colors.cyan}nodeping --help${colors.reset} for usage information`);
+      process.exit(1);
+    }
+  } catch (err) {
+    console.error(`${colors.red}Error:${colors.reset} ${err.message}`);
+    process.exit(1);
+  }
+}
+
+// Run the CLI
+main();
