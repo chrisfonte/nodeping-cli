@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-02-22
+
+### Added
+- Interactive Ink-based TUI (`nodeping tui`) with account picker, check list, details pane, and results view
+- Safe TUI actions for enable/disable and rename (delete remains unavailable)
+- Local state persistence for last-used account in `~/.config/nodeping-cli/state.json`
+
+### Changed
+- Updated README and CLI help to document the TUI command and keybindings
+
 ## [1.2.0] - 2026-02-22
 
 ### Added

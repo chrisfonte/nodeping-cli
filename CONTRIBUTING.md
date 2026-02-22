@@ -241,6 +241,8 @@ Include in your PR:
 ```
 nodeping-cli/
 ├── nodeping           # Main CLI script (single-file architecture)
+├── src/               # TUI implementation (Ink)
+│   └── tui.js
 ├── test.js           # Test suite
 ├── package.json      # NPM package configuration
 ├── README.md         # User documentation
@@ -256,7 +258,7 @@ nodeping-cli/
 ### Design Principles
 
 1. **Single-file CLI** - Keep the core CLI in one file for easy deployment
-2. **Zero dependencies** - Use only Node.js stdlib modules
+2. **Minimal dependencies** - Use stdlib for core CLI, Ink for TUI
 3. **Clear error messages** - Always provide actionable feedback
 4. **Consistent UX** - Follow established patterns for commands and output
 

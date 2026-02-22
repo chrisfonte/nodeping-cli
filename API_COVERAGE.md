@@ -124,7 +124,7 @@ This document tracks which NodePing API features are implemented in the CLI vs w
 
 ## Conclusion
 
-The NodePing CLI v1.2.0 provides **production-ready** support for:
+The NodePing CLI v1.3.0 provides **production-ready** support for:
 - Check lifecycle management (create, update, enable/disable, rename, delete)
 - Check listing and filtering
 - Bulk deletion operations
@@ -139,5 +139,5 @@ It is **purpose-built** for operational use cases like:
 ---
 
 **Last Updated**: 2026-02-22
-**CLI Version**: 1.2.0
+**CLI Version**: 1.3.0
 **API Version**: NodePing API v1

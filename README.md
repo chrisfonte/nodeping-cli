@@ -12,9 +12,10 @@ A command-line interface for the [NodePing](https://nodeping.com) monitoring API
 - ✅ Dry-run mode for safe bulk operations
 - ✅ View recent check results with detailed status
 - ✅ JSON output mode for scripting and automation
+- ✅ Interactive TUI for browsing checks (`nodeping tui`)
 - ✅ Comprehensive error handling with actionable messages
-- ✅ Zero external dependencies (Node.js stdlib only)
-- ✅ Single-file CLI for easy deployment
+- ✅ Minimal dependencies (Ink-based TUI)
+- ✅ Core CLI remains single-file for easy deployment
 - ✅ Production-ready with automated tests
 
 ## Installation
@@ -50,6 +51,25 @@ echo "YOUR_API_TOKEN" > ~/.credentials/nodeping/api_token
 Get your API token from: [https://nodeping.com/account.html](https://nodeping.com/account.html)
 
 ## Usage
+
+### TUI (Interactive)
+
+Launch the terminal UI:
+
+```bash
+nodeping tui
+```
+
+Keybindings:
+- `↑/↓` Move selection
+- `r` View recent results for the selected check
+- `e` Enable/disable the selected check
+- `n` Rename the selected check
+- `a` Switch account
+- `q` Quit
+
+Notes:
+- Delete is intentionally not available in the MVP.
 
 ### List All Checks
 
@@ -351,12 +371,18 @@ If you rely on distinct edge vs origin targets or suffix-specific endpoints, omi
 
 ## Development
 
-The CLI is designed as a single-file Node.js script with zero external dependencies. It uses only Node.js stdlib modules:
+The core CLI remains a single-file Node.js script with stdlib-only dependencies. The TUI is implemented in `src/tui.js` and uses Ink.
 
+Core stdlib modules:
 - `https` — API requests
 - `fs` — Read credentials file
 - `path` — File path handling
 - `os` — Home directory resolution
+
+TUI dependencies:
+- `ink`
+- `ink-text-input`
+- `ink-select-input`
 
 ## Roadmap
 

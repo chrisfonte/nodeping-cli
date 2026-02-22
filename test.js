@@ -86,6 +86,7 @@ test('--help includes all commands', () => {
   assert(output.includes('results'), 'Help should include results');
   assert(output.includes('sync plan'), 'Help should include sync plan');
   assert(output.includes('sync apply'), 'Help should include sync apply');
+  assert(output.includes('tui'), 'Help should include tui');
 });
 
 // Test 5: Help includes all options
@@ -111,6 +112,13 @@ test('--help includes all options', () => {
   assert(output.includes('--desired'), 'Help should include --desired');
   assert(output.includes('--current'), 'Help should include --current');
   assert(output.includes('--normalize'), 'Help should include --normalize');
+});
+
+// Test 6b: TUI help works
+test('tui --help shows TUI usage', () => {
+  const output = exec('./nodeping tui --help');
+  assert(output.includes('NodePing TUI'), 'TUI help should include title');
+  assert(output.includes('nodeping tui'), 'TUI help should include usage');
 });
 
 // Test 6: Bulk delete dry-run threads account to listChecks
