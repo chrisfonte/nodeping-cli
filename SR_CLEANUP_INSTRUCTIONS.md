@@ -7,9 +7,9 @@
 
 ## Prerequisites
 
-1. ✅ NodePing CLI installed at `/Users/chrisfonte/nodeping-cli/`
+1. ✅ NodePing CLI installed (see README.md for installation instructions)
 2. ⏳ API token stored in `~/.credentials/nodeping/api_token`
-3. ⏳ Approval from Pat/Cruze to proceed
+3. ⏳ Approval from stakeholders to proceed
 
 ## Step-by-Step Workflow
 
@@ -29,9 +29,10 @@ cat ~/.credentials/nodeping/api_token
 ### Step 2: Verify CLI Installation
 
 ```bash
-cd /Users/chrisfonte/nodeping-cli
+# Navigate to your NodePing CLI installation directory
+cd /path/to/nodeping-cli
 ./nodeping --version
-# Expected: nodeping v1.0.0
+# Expected: nodeping v1.1.0
 
 ./nodeping --help
 # Should show usage information
@@ -51,9 +52,6 @@ TIMESTAMP=$(date +"%Y-%m-%d_%H-%M-%S")
 
 # Count SR checks
 ./nodeping checks list --filter "SR" --json | jq '. | length'
-
-# Export to CSV for records
-./examples/export-checks-csv.sh "SR" ~/sr-station-cleanup-audit/sr-checks-before-$TIMESTAMP.csv
 
 # Review the list
 cat ~/sr-station-cleanup-audit/sr-checks-before-$TIMESTAMP.txt
@@ -155,21 +153,21 @@ EOF
 cat ~/sr-station-cleanup-audit/sr-cleanup-summary-$TIMESTAMP.md
 ```
 
-## Using the Automated Script
+## Using Automated Scripts
 
-Alternatively, use the included automation script:
+If your installation includes automation scripts in the `examples/` directory:
 
 ```bash
-cd /Users/chrisfonte/nodeping-cli
-./examples/sr-station-cleanup.sh
+cd /path/to/nodeping-cli
+./examples/sr-station-cleanup.sh  # If available
 ```
 
-This script:
-- Creates timestamped audit logs
-- Runs dry-run preview
-- Prompts for confirmation
-- Executes deletion
-- Generates summary
+Automation scripts typically:
+- Create timestamped audit logs
+- Run dry-run previews
+- Prompt for confirmation
+- Execute deletions
+- Generate summaries
 
 ## Invoice Adjustment
 
@@ -241,15 +239,14 @@ To recreate checks:
 
 - **NodePing Support**: support@nodeping.com
 - **CLI Issues**: https://github.com/chrisfonte/nodeping-cli/issues
-- **Project Context**: `/Users/chrisfonte/operations-fontastic/clients/rfc-media/working-sessions/2026-02-16-sr-station-shutdown/`
 
 ## Approval Chain
 
-Before executing deletion, confirm:
+Before executing deletion, ensure you have:
 
-1. **Pat Fant**: Approved SR station shutdown (Feb 16, 2026)
-2. **Cruze**: Confirmed skinny station list (pending)
-3. **Chris**: Technical execution approval
+1. **Business approval**: Confirm with stakeholders that SR station shutdown is approved
+2. **Technical verification**: Verify which stations should be excluded (e.g., skinny stations)
+3. **Execution authorization**: Obtain final approval from technical lead
 
 ## Timeline
 
@@ -265,9 +262,9 @@ After completion, archive audit logs:
 # Create archive
 tar -czf sr-cleanup-audit-$TIMESTAMP.tar.gz ~/sr-station-cleanup-audit/
 
-# Move to operations records
-mv sr-cleanup-audit-$TIMESTAMP.tar.gz ~/operations-fontastic/clients/rfc-media/working-sessions/2026-02-16-sr-station-shutdown/artifacts/
+# Move to your operations/project records directory
+mv sr-cleanup-audit-$TIMESTAMP.tar.gz /path/to/your/project-records/
 
-# Update project document
-# Add completion note to 2026-02-16-sr-station-shutdown.md
+# Update project documentation
+# Add completion notes to your project tracking documents
 ```

@@ -5,12 +5,15 @@ A command-line interface for the [NodePing](https://nodeping.com) monitoring API
 ## Features
 
 - ✅ List all monitoring checks with filtering
-- ✅ Delete single or bulk checks
-- ✅ Dry-run mode for bulk deletions
-- ✅ View recent check results
-- ✅ JSON output mode for scripting
+- ✅ Subaccount support for multi-account management
+- ✅ Delete single or bulk checks with safety guards
+- ✅ Dry-run mode for safe bulk operations
+- ✅ View recent check results with detailed status
+- ✅ JSON output mode for scripting and automation
+- ✅ Comprehensive error handling with actionable messages
 - ✅ Zero external dependencies (Node.js stdlib only)
 - ✅ Single-file CLI for easy deployment
+- ✅ Production-ready with automated tests
 
 ## Installation
 
@@ -95,6 +98,22 @@ nodeping results 201205050153W2Q4C-0J2HSIRF --limit 25
 nodeping results 201205050153W2Q4C-0J2HSIRF --json
 ```
 
+### Subaccount Management
+
+```bash
+# List all subaccounts
+nodeping accounts list
+
+# List checks for a specific subaccount
+nodeping checks list --account 20240908165130J79077
+
+# Delete checks on a subaccount
+nodeping checks delete 201205050153W2Q4C-0J2HSIRF --force --account 20240908165130J79077
+
+# View results for a check on a subaccount
+nodeping results 201205050153W2Q4C-0J2HSIRF --account 20240908165130J79077
+```
+
 ## Command Reference
 
 ### `nodeping checks list [options]`
@@ -103,6 +122,7 @@ List all monitoring checks or filter by pattern.
 
 **Options:**
 - `--filter PATTERN` — Filter checks by label, target, or type (regex)
+- `--account ID` — List checks for a specific subaccount
 - `--json` — Output in JSON format
 
 ### `nodeping checks delete <id> [options]`
@@ -111,6 +131,7 @@ Delete a single check by ID.
 
 **Options:**
 - `--force` — Confirm deletion (required)
+- `--account ID` — Delete check from a specific subaccount
 
 ### `nodeping checks delete --filter PATTERN [options]`
 
@@ -120,6 +141,14 @@ Bulk delete checks matching a filter pattern.
 - `--filter PATTERN` — Filter pattern to match checks
 - `--dry-run` — Preview deletion without executing
 - `--force` — Confirm deletion (required for execution)
+- `--account ID` — Delete checks from a specific subaccount
+
+### `nodeping accounts list [options]`
+
+List all subaccounts.
+
+**Options:**
+- `--json` — Output in JSON format
 
 ### `nodeping results <check-id> [options]`
 
@@ -127,6 +156,7 @@ Show recent results for a specific check.
 
 **Options:**
 - `--limit N` — Number of results to show (default: 10)
+- `--account ID` — Get results for a check on a specific subaccount
 - `--json` — Output in JSON format
 
 ## Use Case: SR Station Shutdown

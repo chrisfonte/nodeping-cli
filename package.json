@@ -1,13 +1,13 @@
 {
   "name": "nodeping-cli",
-  "version": "1.0.0",
-  "description": "Command-line interface for the NodePing monitoring API",
+  "version": "1.1.0",
+  "description": "Command-line interface for the NodePing monitoring API with subaccount support and comprehensive error handling",
   "main": "nodeping",
   "bin": {
     "nodeping": "./nodeping"
   },
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node test.js"
   },
   "repository": {
     "type": "git",
@@ -20,7 +20,10 @@
     "api",
     "uptime",
     "checks",
-    "infrastructure"
+    "infrastructure",
+    "subaccounts",
+    "automation",
+    "devops"
   ],
   "author": "Chris Fonte",
   "license": "MIT",
@@ -30,5 +33,11 @@
   "homepage": "https://github.com/chrisfonte/nodeping-cli#readme",
   "engines": {
     "node": ">=14.0.0"
-  }
+  },
+  "files": [
+    "nodeping",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ]
 }

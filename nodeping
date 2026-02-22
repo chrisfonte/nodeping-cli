@@ -19,7 +19,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
-const VERSION = '1.0.0';
+const VERSION = '1.1.0';
 const API_BASE = 'api.nodeping.com';
 const API_VERSION = '/api/1';
 
@@ -54,13 +54,18 @@ function getApiToken() {
 }
 
 // Make HTTP request to NodePing API
-function apiRequest(method, endpoint, data = null) {
+function apiRequest(method, endpoint, data = null, accountId = null) {
   return new Promise((resolve, reject) => {
     const token = getApiToken();
     
+    let path = `${API_VERSION}${endpoint}${endpoint.includes('?') ? '&' : '?'}token=${token}`;
+    if (accountId) {
+      path += `&customerid=${accountId}`;
+    }
+    
     const options = {
       hostname: API_BASE,
-      path: `${API_VERSION}${endpoint}${endpoint.includes('?') ? '&' : '?'}token=${token}`,
+      path: path,
       method: method,
       headers: {
         'Accept': 'application/json'
@@ -85,18 +90,37 @@ function apiRequest(method, endpoint, data = null) {
           const parsed = JSON.parse(responseData);
           
           if (res.statusCode >= 400) {
-            reject(new Error(parsed.error || `HTTP ${res.statusCode}`));
+            const errorMsg = parsed.error || parsed.message || `HTTP ${res.statusCode}`;
+            if (res.statusCode === 401) {
+              reject(new Error(`Authentication failed: ${errorMsg}\nCheck your API token in ~/.credentials/nodeping/api_token`));
+            } else if (res.statusCode === 403) {
+              reject(new Error(`Permission denied: ${errorMsg}`));
+            } else if (res.statusCode === 404) {
+              reject(new Error(`Not found: ${errorMsg}`));
+            } else {
+              reject(new Error(errorMsg));
+            }
           } else {
             resolve(parsed);
           }
         } catch (err) {
-          reject(new Error(`Failed to parse response: ${err.message}`));
+          if (res.statusCode >= 400) {
+            reject(new Error(`HTTP ${res.statusCode}: ${responseData}`));
+          } else {
+            reject(new Error(`Failed to parse response: ${err.message}`));
+          }
         }
       });
     });
     
     req.on('error', (err) => {
-      reject(err);
+      if (err.code === 'ENOTFOUND') {
+        reject(new Error('Network error: Could not reach NodePing API. Check your internet connection.'));
+      } else if (err.code === 'ECONNREFUSED') {
+        reject(new Error('Connection refused: NodePing API is unreachable.'));
+      } else {
+        reject(new Error(`Network error: ${err.message}`));
+      }
     });
     
     if (data && method !== 'GET') {
@@ -109,7 +133,7 @@ function apiRequest(method, endpoint, data = null) {
 
 // List all checks or filter by pattern
 async function listChecks(options = {}) {
-  const checks = await apiRequest('GET', '/checks');
+  const checks = await apiRequest('GET', '/checks', null, options.account);
   
   let checkList = Object.entries(checks).map(([id, check]) => ({
     id,
@@ -132,7 +156,8 @@ async function listChecks(options = {}) {
   }
   
   // Human-readable output
-  console.log(`${colors.bright}${checkList.length} check(s) found${colors.reset}\n`);
+  const accountNote = options.account ? ` (Account: ${options.account})` : '';
+  console.log(`${colors.bright}${checkList.length} check(s) found${accountNote}${colors.reset}\n`);
   
   checkList.forEach(check => {
     const status = check.state === 1 ? `${colors.green}PASS${colors.reset}` : `${colors.red}FAIL${colors.reset}`;
@@ -225,6 +250,41 @@ async function bulkDelete(filter, options = {}) {
   }
 }
 
+// List all subaccounts
+async function listAccounts(options = {}) {
+  try {
+    const accounts = await apiRequest('GET', '/accounts');
+    
+    if (options.json) {
+      console.log(JSON.stringify(accounts, null, 2));
+      return;
+    }
+    
+    // Human-readable output
+    const accountList = Object.entries(accounts).map(([id, account]) => ({
+      id,
+      ...account
+    }));
+    
+    console.log(`${colors.bright}${accountList.length} account(s) found${colors.reset}\n`);
+    
+    accountList.forEach(account => {
+      const status = account.status === 'Active' ? `${colors.green}Active${colors.reset}` : `${colors.gray}${account.status}${colors.reset}`;
+      
+      console.log(`${colors.cyan}${account.id}${colors.reset}`);
+      console.log(`  Name: ${colors.bright}${account.name || 'Unnamed'}${colors.reset}`);
+      console.log(`  Status: ${status}`);
+      if (account.parent) {
+        console.log(`  Parent Account: ${account.parent}`);
+      }
+      console.log('');
+    });
+  } catch (err) {
+    console.error(`${colors.red}Error:${colors.reset} ${err.message}`);
+    process.exit(1);
+  }
+}
+
 // Get results for a check
 async function getResults(checkId, options = {}) {
   const limit = options.limit || 10;
@@ -241,14 +301,20 @@ async function getResults(checkId, options = {}) {
   console.log(`${colors.bright}Last ${resultList.length} result(s) for ${checkId}${colors.reset}\n`);
   
   resultList.forEach(result => {
-    const status = result.su ? `${colors.green}SUCCESS${colors.reset}` : `${colors.red}FAILURE${colors.reset}`;
-    const date = new Date(result.t);
+    // Handle nested doc structure from API
+    const doc = result.doc || result;
+    const status = doc.su ? `${colors.green}SUCCESS${colors.reset}` : `${colors.red}FAILURE${colors.reset}`;
+    const timestamp = doc.s || doc.t;
+    const date = new Date(timestamp);
     
     console.log(`${colors.cyan}${date.toISOString()}${colors.reset}`);
     console.log(`  Status: ${status}`);
-    console.log(`  Runtime: ${result.rt}ms`);
-    if (result.m) {
-      console.log(`  Message: ${result.m}`);
+    console.log(`  Runtime: ${doc.rt}ms`);
+    if (doc.m) {
+      console.log(`  Message: ${doc.m}`);
+    }
+    if (doc.sc) {
+      console.log(`  Status Code: ${doc.sc}`);
     }
     console.log('');
   });
@@ -259,10 +325,11 @@ function printUsage() {
   console.log(`${colors.bright}NodePing CLI v${VERSION}${colors.reset}
 
 ${colors.bright}Usage:${colors.reset}
-  nodeping checks list [--filter PATTERN] [--json]
-  nodeping checks delete <id> [--force]
-  nodeping checks delete --filter PATTERN [--dry-run] [--force]
-  nodeping results <check-id> [--limit N] [--json]
+  nodeping checks list [--filter PATTERN] [--account ID] [--json]
+  nodeping checks delete <id> [--force] [--account ID]
+  nodeping checks delete --filter PATTERN [--dry-run] [--force] [--account ID]
+  nodeping accounts list [--json]
+  nodeping results <check-id> [--limit N] [--json] [--account ID]
   nodeping --version
   nodeping --help
 
@@ -270,10 +337,12 @@ ${colors.bright}Commands:${colors.reset}
   ${colors.cyan}checks list${colors.reset}              List all monitoring checks
   ${colors.cyan}checks delete <id>${colors.reset}       Delete a specific check by ID
   ${colors.cyan}checks delete --filter${colors.reset}   Bulk delete checks matching pattern
+  ${colors.cyan}accounts list${colors.reset}            List all subaccounts
   ${colors.cyan}results <id>${colors.reset}             Show recent results for a check
 
 ${colors.bright}Options:${colors.reset}
   ${colors.cyan}--filter PATTERN${colors.reset}        Filter checks by label, target, or type (regex)
+  ${colors.cyan}--account ID${colors.reset}            Use a specific subaccount (customerid)
   ${colors.cyan}--dry-run${colors.reset}               Preview bulk deletion without executing
   ${colors.cyan}--force${colors.reset}                 Confirm deletion (required for delete operations)
   ${colors.cyan}--json${colors.reset}                  Output in JSON format
@@ -288,6 +357,12 @@ ${colors.bright}Authentication:${colors.reset}
 ${colors.bright}Examples:${colors.reset}
   ${colors.gray}# List all checks${colors.reset}
   nodeping checks list
+
+  ${colors.gray}# List checks for a subaccount${colors.reset}
+  nodeping checks list --account 20240822231045J30GEH
+
+  ${colors.gray}# List all subaccounts${colors.reset}
+  nodeping accounts list
 
   ${colors.gray}# List checks matching "SR"${colors.reset}
   nodeping checks list --filter "SR"
@@ -329,7 +404,8 @@ async function main() {
     dryRun: false,
     force: false,
     json: false,
-    limit: 10
+    limit: 10,
+    account: null
   };
   
   for (let i = 2; i < args.length; i++) {
@@ -344,6 +420,9 @@ async function main() {
       options.json = true;
     } else if (args[i] === '--limit' && args[i + 1]) {
       options.limit = parseInt(args[i + 1], 10);
+      i++;
+    } else if (args[i] === '--account' && args[i + 1]) {
+      options.account = args[i + 1];
       i++;
     }
   }
@@ -362,6 +441,8 @@ async function main() {
         console.error(`${colors.red}Error:${colors.reset} Specify a check ID or use --filter for bulk deletion`);
         process.exit(1);
       }
+    } else if (command === 'accounts' && subcommand === 'list') {
+      await listAccounts(options);
     } else if (command === 'results') {
       const checkId = args[1];
       if (!checkId || checkId.startsWith('--')) {
@@ -370,7 +451,7 @@ async function main() {
       }
       await getResults(checkId, options);
     } else {
-      console.error(`${colors.red}Error:${colors.reset} Unknown command: ${command} ${subcommand}`);
+      console.error(`${colors.red}Error:${colors.reset} Unknown command: ${command} ${subcommand || ''}`);
       console.error(`Run ${colors.cyan}nodeping --help${colors.reset} for usage information`);
       process.exit(1);
     }
