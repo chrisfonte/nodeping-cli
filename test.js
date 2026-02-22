@@ -91,7 +91,15 @@ test('--help includes all options', () => {
   assert(output.includes('--limit'), 'Help should include --limit');
 });
 
-// Test 6: Invalid command shows error
+// Test 6: Bulk delete dry-run threads account to listChecks
+test('bulk delete dry-run passes account to listChecks', () => {
+  const cliPath = path.join(__dirname, 'nodeping');
+  const source = fs.readFileSync(cliPath, 'utf8');
+  const pattern = /listChecks\(\{\s*filter,\s*json:\s*true,\s*account:\s*options\.account\s*\}\)/;
+  assert(pattern.test(source), 'bulkDelete should pass account to listChecks');
+});
+
+// Test 7: Invalid command shows error
 test('Invalid command shows error', () => {
   const result = exec('./nodeping invalid command 2>&1');
   assert(
@@ -100,7 +108,7 @@ test('Invalid command shows error', () => {
   );
 });
 
-// Test 7: Missing required arguments shows error
+// Test 8: Missing required arguments shows error
 test('results without check-id shows error', () => {
   const result = exec('./nodeping results 2>&1');
   assert(
@@ -109,7 +117,7 @@ test('results without check-id shows error', () => {
   );
 });
 
-// Test 8: package.json exists and is valid
+// Test 9: package.json exists and is valid
 test('package.json exists and is valid', () => {
   const pkgPath = path.join(__dirname, 'package.json');
   assert(fs.existsSync(pkgPath), 'package.json does not exist');
@@ -122,7 +130,7 @@ test('package.json exists and is valid', () => {
   assert(pkg.keywords && pkg.keywords.length > 0, 'package.json should have keywords');
 });
 
-// Test 9: README exists
+// Test 10: README exists
 test('README.md exists', () => {
   const readmePath = path.join(__dirname, 'README.md');
   assert(fs.existsSync(readmePath), 'README.md does not exist');
@@ -133,7 +141,7 @@ test('README.md exists', () => {
   assert(readme.includes('Usage'), 'README should have Usage section');
 });
 
-// Test 10: LICENSE exists
+// Test 11: LICENSE exists
 test('LICENSE file exists', () => {
   const licensePath = path.join(__dirname, 'LICENSE');
   assert(fs.existsSync(licensePath), 'LICENSE does not exist');
@@ -142,7 +150,7 @@ test('LICENSE file exists', () => {
   assert(license.includes('MIT'), 'LICENSE should be MIT');
 });
 
-// Test 11: CHANGELOG exists and follows format
+// Test 12: CHANGELOG exists and follows format
 test('CHANGELOG.md exists and follows keepachangelog format', () => {
   const changelogPath = path.join(__dirname, 'CHANGELOG.md');
   assert(fs.existsSync(changelogPath), 'CHANGELOG.md does not exist');
@@ -152,7 +160,7 @@ test('CHANGELOG.md exists and follows keepachangelog format', () => {
   assert(changelog.includes('keepachangelog.com'), 'CHANGELOG should reference keepachangelog.com');
 });
 
-// Test 12: Credentials file structure (if exists)
+// Test 13: Credentials file structure (if exists)
 test('Credentials directory can be checked', () => {
   const credPath = path.join(require('os').homedir(), '.credentials', 'nodeping');
   // This test just verifies the path resolution works

@@ -19,7 +19,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
-const VERSION = '1.1.0';
+const VERSION = '1.1.1';
 const API_BASE = 'api.nodeping.com';
 const API_VERSION = '/api/1';
 
@@ -202,7 +202,7 @@ async function deleteCheck(checkId, force = false) {
 
 // Bulk delete checks by filter pattern
 async function bulkDelete(filter, options = {}) {
-  const checks = await listChecks({ filter, json: true });
+  const checks = await listChecks({ filter, json: true, account: options.account });
   
   if (checks.length === 0) {
     console.log(`${colors.yellow}No checks found matching filter: ${filter}${colors.reset}`);
