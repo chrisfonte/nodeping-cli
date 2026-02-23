@@ -1,11 +1,14 @@
 const React = require('react');
-const { render, Box, Text, useApp, useInput, useStdout } = require('ink');
-const TextInput = require('ink-text-input').default;
-const SelectInput = require('ink-select-input').default;
+const { render, Box, Text, useApp, useInput } = require('ink');
+const SelectInputModule = require('ink-select-input');
+const TextInputModule = require('ink-text-input');
 const https = require('https');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+
+const SelectInput = SelectInputModule.default || SelectInputModule;
+const TextInput = TextInputModule.default || TextInputModule;
 
 const API_BASE = 'api.nodeping.com';
 const API_VERSION = '/api/1';
@@ -13,19 +16,18 @@ const STATE_PATH = path.join(os.homedir(), '.config', 'nodeping-cli', 'state.jso
 
 function getApiToken() {
   const tokenPath = path.join(os.homedir(), '.credentials', 'nodeping', 'api_token');
-
   try {
     const token = fs.readFileSync(tokenPath, 'utf8').trim();
     if (!token) {
       throw new Error('Token file is empty');
     }
     return token;
-  } catch (err) {
+  } catch (_err) {
     throw new Error(`Could not read API token from ${tokenPath}`);
   }
 }
 
-function apiRequest(method, endpoint, data = null, accountId = null) {
+function apiRequest(method, endpoint, data, accountId) {
   return new Promise((resolve, reject) => {
     let token;
     try {
@@ -64,7 +66,7 @@ function apiRequest(method, endpoint, data = null, accountId = null) {
 
       res.on('end', () => {
         try {
-          const parsed = JSON.parse(responseData);
+          const parsed = JSON.parse(responseData || '{}');
           if (res.statusCode >= 400) {
             const errorMsg = parsed.error || parsed.message || `HTTP ${res.statusCode}`;
             reject(new Error(errorMsg));
@@ -72,7 +74,11 @@ function apiRequest(method, endpoint, data = null, accountId = null) {
             resolve(parsed);
           }
         } catch (err) {
-          reject(new Error(`Failed to parse response: ${err.message}`));
+          if (res.statusCode >= 400) {
+            reject(new Error(`HTTP ${res.statusCode}: ${responseData}`));
+          } else {
+            reject(new Error(`Failed to parse response: ${err.message}`));
+          }
         }
       });
     });
@@ -89,11 +95,47 @@ function apiRequest(method, endpoint, data = null, accountId = null) {
   });
 }
 
+function listChecks(options) {
+  const accountId = options && options.account ? options.account : null;
+  const filter = options && options.filter ? options.filter : null;
+
+  return apiRequest('GET', '/checks', null, accountId).then((checks) => {
+    let checkList = Object.entries(checks || {}).map(([id, check]) => ({ id, ...check }));
+    if (filter) {
+      const pattern = new RegExp(filter, 'i');
+      checkList = checkList.filter((check) => {
+        return (
+          pattern.test(check.label || '') ||
+          pattern.test(check.parameters && check.parameters.target ? check.parameters.target : '') ||
+          pattern.test(check.type || '')
+        );
+      });
+    }
+    return checkList;
+  });
+}
+
+function deleteCheck(checkId, accountId) {
+  return apiRequest('DELETE', `/checks/${checkId}`, null, accountId);
+}
+
+function listAccounts() {
+  return apiRequest('GET', '/accounts');
+}
+
+function getResults(checkId, options) {
+  const limit = options && options.limit ? options.limit : 10;
+  const accountId = options && options.account ? options.account : null;
+  return apiRequest('GET', `/results/${checkId}?limit=${limit}`, null, accountId).then((results) => {
+    return Array.isArray(results) ? results : [results];
+  });
+}
+
 function readState() {
   try {
     const raw = fs.readFileSync(STATE_PATH, 'utf8');
     return JSON.parse(raw);
-  } catch (err) {
+  } catch (_err) {
     return {};
   }
 }
@@ -102,35 +144,30 @@ function writeState(nextState) {
   try {
     fs.mkdirSync(path.dirname(STATE_PATH), { recursive: true });
     fs.writeFileSync(STATE_PATH, JSON.stringify(nextState, null, 2));
-  } catch (err) {
+  } catch (_err) {
     // Ignore state write failures in the TUI.
   }
 }
 
-function normalizeChecks(data) {
-  if (!data) return [];
-  if (Array.isArray(data)) return data;
-  return Object.entries(data).map(([id, check]) => ({ id, ...check }));
+function truncateText(text, maxLength) {
+  const value = String(text || '');
+  const chars = Array.from(value);
+  if (chars.length <= maxLength) return value;
+  if (maxLength <= 1) return '...';
+  return `${chars.slice(0, maxLength - 3).join('')}...`;
 }
 
-function truncate(text, max) {
-  if (!text) return '';
-  const str = String(text);
-  if (str.length <= max) return str;
-  return `${str.slice(0, Math.max(0, max - 1))}…`;
-}
-
-function padRight(text, width) {
-  const str = text === undefined || text === null ? '' : String(text);
-  if (str.length >= width) return str.slice(0, width);
-  return str + ' '.repeat(width - str.length);
+function padCell(text, width) {
+  const value = String(text || '');
+  if (value.length >= width) return value.slice(0, width);
+  return `${value}${' '.repeat(width - value.length)}`;
 }
 
 function formatTimestamp(value) {
   if (!value) return 'n/a';
   let timestamp = value;
-  if (typeof value === 'string' && /^\d+$/.test(value)) {
-    timestamp = Number(value);
+  if (typeof timestamp === 'string' && /^\d+$/.test(timestamp)) {
+    timestamp = Number(timestamp);
   }
   if (typeof timestamp === 'number' && timestamp < 1e12) {
     timestamp *= 1000;
@@ -142,458 +179,1011 @@ function formatTimestamp(value) {
   return date.toISOString();
 }
 
-function getLastModified(check) {
-  return (
-    check.modified ||
-    check.lastmodified ||
-    check.lastModified ||
-    check.modified_time ||
-    check.m ||
-    null
+function getCheckTarget(check) {
+  return (check && check.parameters && check.parameters.target) || '';
+}
+
+function getCheckStateLabel(check) {
+  return check && check.state === 1 ? 'PASS' : 'FAIL';
+}
+
+function ScreenFrame(props) {
+  const children = props.children;
+  return React.createElement(
+    Box,
+    { flexDirection: 'column', paddingLeft: 1, paddingRight: 1 },
+    React.createElement(Text, { bold: true, color: 'cyan' }, props.title || 'NodePing CLI'),
+    props.subtitle ? React.createElement(Text, { color: 'gray' }, props.subtitle) : null,
+    React.createElement(Box, { marginTop: 1, flexDirection: 'column' }, children),
+    React.createElement(Box, { marginTop: 1 }, React.createElement(Text, { color: 'gray' }, props.help || 'Use arrow keys and Enter. q to go back.'))
   );
 }
 
-function countNotifications(check) {
-  const data = check.notifications || check.notification || check.notify;
-  if (!data) return 0;
-  if (Array.isArray(data)) return data.length;
-  if (typeof data === 'object') return Object.keys(data).length;
-  return 1;
+function SimpleSpinner() {
+  const frames = ['-', '\\', '|', '/'];
+  const [index, setIndex] = React.useState(0);
+
+  React.useEffect(() => {
+    const timer = setInterval(() => {
+      setIndex((prev) => (prev + 1) % frames.length);
+    }, 80);
+    return () => clearInterval(timer);
+  }, []);
+
+  return React.createElement(Text, { color: 'cyan' }, frames[index]);
 }
 
-function deriveStatus(check) {
-  if (check.state === 1) return 'PASS';
-  if (check.state === 0) return 'FAIL';
-  if (check.state === 'up') return 'PASS';
-  if (check.state === 'down') return 'FAIL';
-  return 'UNKNOWN';
-}
-
-function getTarget(check) {
-  return check.parameters?.target || check.target || '';
-}
-
-function ChecksList({ checks, selectedIndex }) {
-  const { stdout } = useStdout();
-  const rows = (stdout && stdout.rows) ? stdout.rows : 24;
-  const listHeight = Math.max(5, rows - 12);
-  const start = Math.max(
-    0,
-    Math.min(
-      selectedIndex - Math.floor(listHeight / 2),
-      Math.max(0, checks.length - listHeight)
+function LoadingScreen(props) {
+  return React.createElement(
+    ScreenFrame,
+    {
+      title: props.title,
+      subtitle: props.subtitle,
+      help: props.help || 'Please wait...'
+    },
+    React.createElement(
+      Box,
+      null,
+      React.createElement(SimpleSpinner, null),
+      React.createElement(Text, null, ` ${props.message || 'Loading...'}`)
     )
   );
-  const visible = checks.slice(start, start + listHeight);
-
-  return (
-    <Box flexDirection="column">
-      {visible.map((check, index) => {
-        const actualIndex = start + index;
-        const isSelected = actualIndex === selectedIndex;
-        const enabled = check.enable === 'active' ? 'enabled' : 'disabled';
-        const target = truncate(getTarget(check), 24);
-        const label = truncate(check.label || '', 26);
-        const type = (check.type || '').toUpperCase();
-        const interval = check.interval !== undefined ? `${check.interval}m` : '-';
-        const row = [
-          padRight(label, 26),
-          padRight(type, 6),
-          padRight(enabled, 9),
-          padRight(target, 24),
-          padRight(interval, 6)
-        ].join(' ');
-
-        return (
-          <Text key={check.id} inverse={isSelected}>
-            {row}
-          </Text>
-        );
-      })}
-      {visible.length === 0 ? (
-        <Text color="gray">No checks matched the current filter.</Text>
-      ) : null}
-    </Box>
-  );
 }
 
-function DetailsPane({ check }) {
-  if (!check) {
-    return (
-      <Box flexDirection="column">
-        <Text color="gray">Select a check to see details.</Text>
-      </Box>
-    );
-  }
-
-  const enabled = check.enable === 'active' ? 'Enabled' : 'Disabled';
-  const status = deriveStatus(check);
-  const lastModified = formatTimestamp(getLastModified(check));
-  const notifications = countNotifications(check);
-
-  return (
-    <Box flexDirection="column">
-      <Text bold>{check.label || 'Untitled Check'}</Text>
-      <Text color="gray">{check.id}</Text>
-      <Box marginTop={1} flexDirection="column">
-        <Text>Type: {check.type || 'n/a'}</Text>
-        <Text>Target: {getTarget(check) || 'n/a'}</Text>
-        <Text>Interval: {check.interval !== undefined ? `${check.interval} minutes` : 'n/a'}</Text>
-        <Text>Status: {status}</Text>
-        <Text>Enabled: {enabled}</Text>
-        <Text>Last Modified: {lastModified}</Text>
-        <Text>Notifications: {notifications}</Text>
-      </Box>
-    </Box>
-  );
-}
-
-function ResultsView({ results, limit }) {
-  return (
-    <Box flexDirection="column">
-      <Text bold>Recent Results (limit: {limit})</Text>
-      <Text color="gray">Press + / - to change limit, r to refresh, b to return.</Text>
-      <Box marginTop={1} flexDirection="column">
-        {results.length === 0 ? (
-          <Text color="gray">No results available.</Text>
-        ) : (
-          results.map((result, index) => {
-            const doc = result.doc || result;
-            const status = doc.su ? 'SUCCESS' : 'FAILURE';
-            const timestamp = formatTimestamp(doc.s || doc.t);
-            const runtime = doc.rt !== undefined ? `${doc.rt}ms` : 'n/a';
-            const message = doc.m ? truncate(doc.m, 80) : '';
-            return (
-              <Box key={`${timestamp}-${index}`} flexDirection="column" marginBottom={1}>
-                <Text>{timestamp}</Text>
-                <Text>Status: {status} | Runtime: {runtime}</Text>
-                {message ? <Text color="gray">{message}</Text> : null}
-              </Box>
-            );
-          })
-        )}
-      </Box>
-    </Box>
-  );
-}
-
-function App({ initialAccountId }) {
-  const { exit } = useApp();
-  const [mode, setMode] = React.useState('loading');
-  const [accounts, setAccounts] = React.useState([]);
-  const [accountId, setAccountId] = React.useState(initialAccountId || null);
-  const [checks, setChecks] = React.useState([]);
-  const [filter, setFilter] = React.useState('');
-  const [selectedIndex, setSelectedIndex] = React.useState(0);
-  const [results, setResults] = React.useState([]);
-  const [resultsLimit, setResultsLimit] = React.useState(10);
-  const [message, setMessage] = React.useState('');
-  const [error, setError] = React.useState('');
-  const [accountSelectIndex, setAccountSelectIndex] = React.useState(0);
-  const [isRenaming, setIsRenaming] = React.useState(false);
-  const [renameValue, setRenameValue] = React.useState('');
-
-  React.useEffect(() => {
-    let isActive = true;
-    async function loadAccounts() {
-      setMode('loading');
-      try {
-        const data = await apiRequest('GET', '/accounts');
-        if (!isActive) return;
-        const list = Object.entries(data || {}).map(([id, account]) => ({
-          id,
-          name: account.name || 'Unnamed',
-          status: account.status || 'Unknown'
-        }));
-        setAccounts(list);
-
-        const stored = readState().lastAccountId;
-        const defaultId = initialAccountId || stored;
-        const defaultIndex = Math.max(0, list.findIndex((account) => account.id === defaultId));
-        setAccountSelectIndex(defaultIndex);
-        setMode('pick-account');
-      } catch (err) {
-        if (!isActive) return;
-        setError(err.message || 'Failed to load accounts.');
-      }
-    }
-
-    loadAccounts();
-    return () => {
-      isActive = false;
-    };
-  }, [initialAccountId]);
-
-  async function handleAccountSelect(nextId) {
-    setAccountId(nextId);
-    writeState({ lastAccountId: nextId });
-    setMode('loading-checks');
-    setMessage('');
-    try {
-      const data = await apiRequest('GET', '/checks', null, nextId);
-      const list = normalizeChecks(data);
-      setChecks(list);
-      setSelectedIndex(0);
-      setMode('list');
-    } catch (err) {
-      setError(err.message || 'Failed to load checks.');
-      setMode('list');
-    }
-  }
-
-  const filteredChecks = React.useMemo(() => {
-    if (!filter) return checks;
-    const lower = filter.toLowerCase();
-    return checks.filter((check) => {
-      const target = getTarget(check).toLowerCase();
-      return (
-        (check.label || '').toLowerCase().includes(lower) ||
-        (check.type || '').toLowerCase().includes(lower) ||
-        target.includes(lower)
-      );
-    });
-  }, [checks, filter]);
-
-  React.useEffect(() => {
-    if (selectedIndex >= filteredChecks.length) {
-      setSelectedIndex(0);
-    }
-  }, [filteredChecks, selectedIndex]);
-
-  const selectedCheck = filteredChecks[selectedIndex];
-  const accountLabel = accounts.find((account) => account.id === accountId)?.name || accountId || 'n/a';
-
-  async function refreshChecks() {
-    if (!accountId) return;
-    setMode('loading-checks');
-    try {
-      const data = await apiRequest('GET', '/checks', null, accountId);
-      const list = normalizeChecks(data);
-      setChecks(list);
-      setMode('list');
-    } catch (err) {
-      setError(err.message || 'Failed to refresh checks.');
-      setMode('list');
-    }
-  }
-
-  async function toggleCheckStatus() {
-    if (!selectedCheck) return;
-    const nextEnable = selectedCheck.enable === 'active' ? 'inactive' : 'active';
-    setMessage('Updating check status...');
-    try {
-      await apiRequest('PUT', `/checks/${selectedCheck.id}`, { enable: nextEnable }, accountId);
-      setMessage(`Check ${nextEnable === 'active' ? 'enabled' : 'disabled'}.`);
-      await refreshChecks();
-    } catch (err) {
-      setMessage('');
-      setError(err.message || 'Failed to update check status.');
-    }
-  }
-
-  async function submitRename() {
-    if (!renameValue.trim() || !selectedCheck) {
-      setIsRenaming(false);
-      return;
-    }
-    setMessage('Renaming check...');
-    setIsRenaming(false);
-    try {
-      await apiRequest('PUT', `/checks/${selectedCheck.id}`, { label: renameValue.trim() }, accountId);
-      setMessage('Check renamed.');
-      await refreshChecks();
-    } catch (err) {
-      setMessage('');
-      setError(err.message || 'Failed to rename check.');
-    }
-  }
-
-  async function loadResults() {
-    return loadResultsWithLimit(resultsLimit);
-  }
-
-  async function loadResultsWithLimit(limit) {
-    if (!selectedCheck) return;
-    setMode('results');
-    setMessage('Loading results...');
-    try {
-      const data = await apiRequest('GET', `/results/${selectedCheck.id}?limit=${limit}`, null, accountId);
-      const list = Array.isArray(data) ? data : [data];
-      setResults(list);
-      setMessage('');
-    } catch (err) {
-      setError(err.message || 'Failed to load results.');
-      setMessage('');
-    }
-  }
-
+function ErrorScreen(props) {
   useInput((input, key) => {
-    if (input === 'q') {
-      exit();
-      return;
-    }
-
-    if (key.escape) {
-      if (isRenaming) {
-        setIsRenaming(false);
-        setRenameValue('');
-        return;
-      }
-      if (mode === 'results') {
-        setMode('list');
-        return;
-      }
-    }
-
-    if (isRenaming) return;
-
-    if (mode === 'list') {
-      if (key.upArrow) {
-        setSelectedIndex((prev) => Math.max(0, prev - 1));
-      } else if (key.downArrow) {
-        setSelectedIndex((prev) => {
-          if (filteredChecks.length === 0) return 0;
-          return Math.min(filteredChecks.length - 1, prev + 1);
-        });
-      } else if (input === 'r') {
-        loadResults();
-      } else if (input === 'e') {
-        toggleCheckStatus();
-      } else if (input === 'n') {
-        setRenameValue(selectedCheck ? selectedCheck.label || '' : '');
-        setIsRenaming(true);
-      } else if (input === 'a') {
-        const currentIndex = Math.max(0, accounts.findIndex((account) => account.id === accountId));
-        setAccountSelectIndex(currentIndex);
-        setMode('pick-account');
-      }
-    } else if (mode === 'results') {
-      if (input === 'b') {
-        setMode('list');
-      } else if (input === 'r') {
-        loadResults();
-      } else if (input === '+') {
-        const next = Math.min(50, resultsLimit + 5);
-        setResultsLimit(next);
-        loadResultsWithLimit(next);
-      } else if (input === '-') {
-        const next = Math.max(1, resultsLimit - 5);
-        setResultsLimit(next);
-        loadResultsWithLimit(next);
-      }
+    if (input === 'q' || key.escape || key.return) {
+      props.onBack();
     }
   });
 
-  if (error) {
-    return (
-      <Box flexDirection="column">
-        <Text color="red">Error: {error}</Text>
-        <Text color="gray">Press q to quit.</Text>
-      </Box>
-    );
-  }
-
-  if (mode === 'loading') {
-    return (
-      <Box flexDirection="column">
-        <Text>Loading accounts...</Text>
-      </Box>
-    );
-  }
-
-  if (mode === 'pick-account') {
-    const items = accounts.map((account) => ({
-      label: `${account.name} (${account.id})`,
-      value: account.id
-    }));
-
-    return (
-      <Box flexDirection="column">
-        <Text bold>Select an account</Text>
-        <Text color="gray">Use ↑/↓ and Enter. Press q to quit.</Text>
-        <Box marginTop={1}>
-          <SelectInput
-            items={items}
-            initialIndex={accountSelectIndex}
-            onSelect={(item) => handleAccountSelect(item.value)}
-          />
-        </Box>
-      </Box>
-    );
-  }
-
-  if (mode === 'loading-checks') {
-    return (
-      <Box flexDirection="column">
-        <Text>Loading checks for {accountLabel}...</Text>
-      </Box>
-    );
-  }
-
-  if (mode === 'results') {
-    return (
-      <Box flexDirection="column">
-        <ResultsView results={results} limit={resultsLimit} />
-      </Box>
-    );
-  }
-
-  return (
-    <Box flexDirection="column">
-      <Text bold>NodePing TUI</Text>
-      <Text color="gray">Account: {accountLabel} | Checks: {filteredChecks.length} | a = switch account</Text>
-      <Text color="gray">↑/↓ move  r results  e enable/disable  n rename  q quit</Text>
-      <Text color="gray">Delete (coming soon)</Text>
-
-      <Box marginTop={1} flexDirection="column">
-        <Box>
-          <Text>Filter: </Text>
-          <TextInput value={filter} onChange={setFilter} />
-        </Box>
-
-        <Box marginTop={1} flexDirection="column">
-          <Text color="gray">Label                      Type   Enabled   Target                   Intvl</Text>
-          <ChecksList
-            checks={filteredChecks}
-            selectedIndex={selectedIndex}
-          />
-        </Box>
-      </Box>
-
-      <Box marginTop={1} borderStyle="round" paddingLeft={1} paddingRight={1} flexDirection="column">
-        <DetailsPane check={selectedCheck} />
-      </Box>
-
-      {isRenaming ? (
-        <Box marginTop={1} flexDirection="column">
-          <Text>Rename check (Enter to save, Esc to cancel):</Text>
-          <TextInput value={renameValue} onChange={setRenameValue} onSubmit={submitRename} />
-        </Box>
-      ) : null}
-
-      {message ? (
-        <Box marginTop={1}>
-          <Text color="green">{message}</Text>
-        </Box>
-      ) : null}
-    </Box>
+  return React.createElement(
+    ScreenFrame,
+    {
+      title: props.title,
+      subtitle: props.subtitle,
+      help: 'Press q, Esc, or Enter to go back.'
+    },
+    React.createElement(Text, { color: 'red' }, `Error: ${props.error || 'Unknown error'}`)
   );
 }
 
-function printHelp() {
-  console.log(`NodePing TUI\n\nUsage:\n  nodeping tui\n\nKeys:\n  ↑/↓    Move selection\n  r      View recent results\n  e      Enable/disable selected check\n  n      Rename selected check\n  a      Switch account\n  q      Quit\n\nNotes:\n  Delete is not available in the MVP.`);
+function MenuScreen(props) {
+  const items = props.items || [];
+
+  useInput((input, key) => {
+    if (input === 'q' || key.escape) {
+      props.onBack();
+    }
+  });
+
+  return React.createElement(
+    ScreenFrame,
+    {
+      title: props.title,
+      subtitle: props.subtitle,
+      help: props.help || 'Use up/down and Enter. q to go back.'
+    },
+    React.createElement(SelectInput, {
+      items,
+      onSelect: (item) => props.onSelect(item.value)
+    })
+  );
 }
 
-async function runTui(args = []) {
-  if (args.includes('--help') || args.includes('-h')) {
+function selectMenu(props) {
+  return React.createElement(MenuScreen, props);
+}
+
+function ChecksTable(props) {
+  const checks = props.checks || [];
+  const rows = checks.map((check) => {
+    return {
+      id: check.id || '',
+      label: truncateText(check.label || '', 24),
+      type: truncateText((check.type || '').toUpperCase(), 8),
+      target: truncateText(getCheckTarget(check), 36),
+      status: getCheckStateLabel(check),
+      enabled: check.enable === 'active' ? 'active' : 'inactive',
+      interval: check.interval !== undefined ? String(check.interval) : ''
+    };
+  });
+
+  const widths = {
+    id: 24,
+    label: 24,
+    type: 8,
+    target: 36,
+    status: 6,
+    enabled: 8,
+    interval: 3
+  };
+
+  return React.createElement(
+    Box,
+    { flexDirection: 'column' },
+    React.createElement(
+      Text,
+      { color: 'cyan' },
+      `${padCell('ID', widths.id)} ${padCell('Label', widths.label)} ${padCell('Type', widths.type)} ${padCell('Target', widths.target)} ${padCell('State', widths.status)} ${padCell('Enabled', widths.enabled)} ${padCell('Int', widths.interval)}`
+    ),
+    rows.length === 0
+      ? React.createElement(Text, { color: 'yellow' }, 'No checks found.')
+      : rows.map((row) => {
+          const statusNode = row.status === 'PASS'
+            ? React.createElement(Text, { color: 'green' }, row.status)
+            : React.createElement(Text, { color: 'red' }, row.status);
+
+          return React.createElement(
+            Box,
+            { key: row.id },
+            React.createElement(Text, null, `${padCell(row.id, widths.id)} ${padCell(row.label, widths.label)} ${padCell(row.type, widths.type)} ${padCell(row.target, widths.target)} `),
+            statusNode,
+            React.createElement(Text, null, ` ${padCell(row.enabled, widths.enabled)} ${padCell(row.interval, widths.interval)}`)
+          );
+        })
+  );
+}
+
+function actionListAllChecks(props) {
+  const [loading, setLoading] = React.useState(true);
+  const [error, setError] = React.useState('');
+  const [checks, setChecks] = React.useState([]);
+
+  React.useEffect(() => {
+    let active = true;
+    listChecks({ account: props.accountId })
+      .then((data) => {
+        if (!active) return;
+        setChecks(data);
+      })
+      .catch((err) => {
+        if (!active) return;
+        setError(err.message || 'Failed to load checks');
+      })
+      .finally(() => {
+        if (!active) return;
+        setLoading(false);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [props.accountId]);
+
+  useInput((input, key) => {
+    if (!loading && (input === 'q' || key.escape)) {
+      props.onBack();
+    }
+  });
+
+  if (loading) {
+    return React.createElement(LoadingScreen, {
+      title: 'Checks > List All',
+      subtitle: props.accountText,
+      message: 'Loading checks...',
+      help: 'q to cancel'
+    });
+  }
+
+  if (error) {
+    return React.createElement(ErrorScreen, {
+      title: 'Checks > List All',
+      subtitle: props.accountText,
+      error,
+      onBack: props.onBack
+    });
+  }
+
+  return React.createElement(
+    ScreenFrame,
+    {
+      title: 'Checks > List All',
+      subtitle: `${props.accountText} | ${checks.length} check(s)`,
+      help: 'Press q or Esc to go back.'
+    },
+    React.createElement(ChecksTable, { checks })
+  );
+}
+
+function actionFilterChecks(props) {
+  const [stage, setStage] = React.useState('input');
+  const [pattern, setPattern] = React.useState('');
+  const [loading, setLoading] = React.useState(false);
+  const [error, setError] = React.useState('');
+  const [checks, setChecks] = React.useState([]);
+
+  useInput((input, key) => {
+    if (stage !== 'input' && !loading && (input === 'q' || key.escape)) {
+      props.onBack();
+    }
+    if (stage === 'input' && key.escape) {
+      props.onBack();
+    }
+  });
+
+  function submit() {
+    if (!pattern.trim()) {
+      setError('Filter pattern is required.');
+      setStage('result');
+      return;
+    }
+
+    setLoading(true);
+    setError('');
+    listChecks({ account: props.accountId, filter: pattern.trim() })
+      .then((data) => {
+        setChecks(data);
+        setStage('result');
+      })
+      .catch((err) => {
+        setError(err.message || 'Failed to filter checks');
+        setStage('result');
+      })
+      .finally(() => {
+        setLoading(false);
+      });
+  }
+
+  if (loading) {
+    return React.createElement(LoadingScreen, {
+      title: 'Checks > Filter',
+      subtitle: props.accountText,
+      message: 'Filtering checks...'
+    });
+  }
+
+  if (stage === 'input') {
+    return React.createElement(
+      ScreenFrame,
+      {
+        title: 'Checks > Filter by Pattern',
+        subtitle: props.accountText,
+        help: 'Type a regex pattern and press Enter. Esc to go back.'
+      },
+      React.createElement(Box, null,
+        React.createElement(Text, null, 'Pattern: '),
+        React.createElement(TextInput, {
+          value: pattern,
+          onChange: setPattern,
+          onSubmit: submit
+        })
+      )
+    );
+  }
+
+  if (error) {
+    return React.createElement(ErrorScreen, {
+      title: 'Checks > Filter',
+      subtitle: props.accountText,
+      error,
+      onBack: props.onBack
+    });
+  }
+
+  return React.createElement(
+    ScreenFrame,
+    {
+      title: 'Checks > Filter Results',
+      subtitle: `${props.accountText} | pattern: ${pattern} | ${checks.length} match(es)`,
+      help: 'Press q or Esc to go back.'
+    },
+    React.createElement(ChecksTable, { checks })
+  );
+}
+
+function CheckMenu(props) {
+  const items = (props.checks || []).map((check) => ({
+    label: `${truncateText(check.label || '(unlabeled)', 36)} [${check.id}]`,
+    value: check
+  }));
+
+  return React.createElement(MenuScreen, {
+    title: props.title,
+    subtitle: `${props.accountText} | ${items.length} check(s)`,
+    items,
+    onSelect: props.onSelect,
+    onBack: props.onBack,
+    help: 'Use up/down and Enter. q to cancel.'
+  });
+}
+
+function actionViewCheckDetails(props) {
+  const [loading, setLoading] = React.useState(true);
+  const [error, setError] = React.useState('');
+  const [checks, setChecks] = React.useState([]);
+  const [selected, setSelected] = React.useState(null);
+
+  React.useEffect(() => {
+    let active = true;
+    listChecks({ account: props.accountId })
+      .then((data) => {
+        if (!active) return;
+        setChecks(data);
+      })
+      .catch((err) => {
+        if (!active) return;
+        setError(err.message || 'Failed to load checks');
+      })
+      .finally(() => {
+        if (!active) return;
+        setLoading(false);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [props.accountId]);
+
+  useInput((input, key) => {
+    if (selected && (input === 'q' || key.escape)) {
+      props.onBack();
+    }
+  });
+
+  if (loading) {
+    return React.createElement(LoadingScreen, {
+      title: 'Checks > View Details',
+      subtitle: props.accountText,
+      message: 'Loading checks...'
+    });
+  }
+
+  if (error) {
+    return React.createElement(ErrorScreen, {
+      title: 'Checks > View Details',
+      subtitle: props.accountText,
+      error,
+      onBack: props.onBack
+    });
+  }
+
+  if (!selected) {
+    return React.createElement(CheckMenu, {
+      title: 'Checks > Select Check',
+      accountText: props.accountText,
+      checks,
+      onSelect: setSelected,
+      onBack: props.onBack
+    });
+  }
+
+  return React.createElement(
+    ScreenFrame,
+    {
+      title: 'Checks > Details',
+      subtitle: `${props.accountText} | ${selected.id}`,
+      help: 'Press q or Esc to go back.'
+    },
+    React.createElement(Text, { bold: true }, selected.label || '(unlabeled)'),
+    React.createElement(Text, null, `ID: ${selected.id}`),
+    React.createElement(Text, null, `Type: ${(selected.type || '').toUpperCase()}`),
+    React.createElement(Text, null, `Target: ${getCheckTarget(selected) || 'n/a'}`),
+    React.createElement(Text, null, `Interval: ${selected.interval || 'n/a'} min`),
+    React.createElement(Text, null, `State: ${getCheckStateLabel(selected)}`),
+    React.createElement(Text, null, `Enabled: ${selected.enable === 'active' ? 'active' : 'inactive'}`),
+    React.createElement(Text, null, 'Raw:'),
+    React.createElement(Text, { color: 'gray' }, JSON.stringify(selected, null, 2))
+  );
+}
+
+function actionDeleteCheck(props) {
+  const [loading, setLoading] = React.useState(true);
+  const [error, setError] = React.useState('');
+  const [checks, setChecks] = React.useState([]);
+  const [selected, setSelected] = React.useState(null);
+  const [deleting, setDeleting] = React.useState(false);
+  const [resultMessage, setResultMessage] = React.useState('');
+
+  React.useEffect(() => {
+    let active = true;
+    listChecks({ account: props.accountId })
+      .then((data) => {
+        if (!active) return;
+        setChecks(data);
+      })
+      .catch((err) => {
+        if (!active) return;
+        setError(err.message || 'Failed to load checks');
+      })
+      .finally(() => {
+        if (!active) return;
+        setLoading(false);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [props.accountId]);
+
+  useInput((input, key) => {
+    if (!deleting && resultMessage && (input === 'q' || key.escape || key.return)) {
+      props.onBack();
+    }
+    if (!deleting && !resultMessage && selected && (input === 'q' || key.escape)) {
+      props.onBack();
+    }
+  });
+
+  if (loading) {
+    return React.createElement(LoadingScreen, {
+      title: 'Checks > Delete',
+      subtitle: props.accountText,
+      message: 'Loading checks...'
+    });
+  }
+
+  if (error) {
+    return React.createElement(ErrorScreen, {
+      title: 'Checks > Delete',
+      subtitle: props.accountText,
+      error,
+      onBack: props.onBack
+    });
+  }
+
+  if (!selected) {
+    return React.createElement(CheckMenu, {
+      title: 'Checks > Delete > Select Check',
+      accountText: props.accountText,
+      checks,
+      onSelect: setSelected,
+      onBack: props.onBack
+    });
+  }
+
+  if (deleting) {
+    return React.createElement(LoadingScreen, {
+      title: 'Checks > Delete',
+      subtitle: `${props.accountText} | ${selected.id}`,
+      message: `Deleting ${selected.label || selected.id}...`
+    });
+  }
+
+  if (resultMessage) {
+    return React.createElement(
+      ScreenFrame,
+      {
+        title: 'Checks > Delete',
+        subtitle: props.accountText,
+        help: 'Press q, Esc, or Enter to go back.'
+      },
+      React.createElement(Text, { color: resultMessage.startsWith('Deleted') ? 'green' : 'red' }, resultMessage)
+    );
+  }
+
+  const confirmItems = [
+    { label: 'Cancel', value: 'cancel' },
+    { label: `Delete ${selected.label || selected.id}`, value: 'confirm' }
+  ];
+
+  return React.createElement(
+    ScreenFrame,
+    {
+      title: 'Checks > Delete > Confirm',
+      subtitle: `${props.accountText} | ${selected.id}`,
+      help: 'Use up/down and Enter. q to cancel.'
+    },
+    React.createElement(Text, { color: 'yellow' }, `Delete check "${selected.label || selected.id}"?`),
+    React.createElement(SelectInput, {
+      items: confirmItems,
+      onSelect: (item) => {
+        if (item.value === 'cancel') {
+          props.onBack();
+          return;
+        }
+
+        setDeleting(true);
+        deleteCheck(selected.id, props.accountId)
+          .then((res) => {
+            if (res && res.ok) {
+              setResultMessage(`Deleted check: ${selected.id}`);
+            } else {
+              setResultMessage(`Delete failed for check: ${selected.id}`);
+            }
+          })
+          .catch((err) => {
+            setResultMessage(`Delete failed: ${err.message || 'Unknown error'}`);
+          })
+          .finally(() => {
+            setDeleting(false);
+          });
+      }
+    })
+  );
+}
+
+function actionViewRecentResults(props) {
+  const [loading, setLoading] = React.useState(true);
+  const [error, setError] = React.useState('');
+  const [rows, setRows] = React.useState([]);
+
+  React.useEffect(() => {
+    let active = true;
+
+    async function loadRecent() {
+      try {
+        const checks = await listChecks({ account: props.accountId });
+        const limitedChecks = checks.slice(0, 10);
+        const nextRows = [];
+
+        for (const check of limitedChecks) {
+          try {
+            const result = await getResults(check.id, { account: props.accountId, limit: 1 });
+            const doc = result && result[0] ? (result[0].doc || result[0]) : null;
+            nextRows.push({
+              id: check.id,
+              label: check.label || '',
+              status: doc && doc.su ? 'SUCCESS' : 'FAIL',
+              runtime: doc && doc.rt !== undefined ? String(doc.rt) : '',
+              when: formatTimestamp(doc && (doc.s || doc.t))
+            });
+          } catch (itemErr) {
+            nextRows.push({
+              id: check.id,
+              label: check.label || '',
+              status: 'ERROR',
+              runtime: '',
+              when: truncateText(itemErr.message || 'Unknown error', 32)
+            });
+          }
+        }
+
+        if (!active) return;
+        setRows(nextRows);
+      } catch (err) {
+        if (!active) return;
+        setError(err.message || 'Failed to load recent results');
+      } finally {
+        if (!active) return;
+        setLoading(false);
+      }
+    }
+
+    loadRecent();
+
+    return () => {
+      active = false;
+    };
+  }, [props.accountId]);
+
+  useInput((input, key) => {
+    if (!loading && (input === 'q' || key.escape)) {
+      props.onBack();
+    }
+  });
+
+  if (loading) {
+    return React.createElement(LoadingScreen, {
+      title: 'Results > View Recent Results',
+      subtitle: props.accountText,
+      message: 'Loading recent results...'
+    });
+  }
+
+  if (error) {
+    return React.createElement(ErrorScreen, {
+      title: 'Results > View Recent Results',
+      subtitle: props.accountText,
+      error,
+      onBack: props.onBack
+    });
+  }
+
+  const widths = { label: 24, id: 24, status: 7, rt: 6 };
+
+  return React.createElement(
+    ScreenFrame,
+    {
+      title: 'Results > View Recent Results',
+      subtitle: `${props.accountText} | Top ${rows.length} checks`,
+      help: 'Press q or Esc to go back.'
+    },
+    React.createElement(Text, { color: 'cyan' }, `${padCell('Label', widths.label)} ${padCell('ID', widths.id)} ${padCell('Status', widths.status)} ${padCell('RT(ms)', widths.rt)} When`),
+    rows.length === 0
+      ? React.createElement(Text, { color: 'yellow' }, 'No checks found.')
+      : rows.map((row) => {
+          let statusColor = 'green';
+          if (row.status === 'FAIL') statusColor = 'red';
+          if (row.status === 'ERROR') statusColor = 'yellow';
+
+          return React.createElement(
+            Box,
+            { key: row.id },
+            React.createElement(Text, null, `${padCell(truncateText(row.label, widths.label), widths.label)} ${padCell(row.id, widths.id)} `),
+            React.createElement(Text, { color: statusColor }, padCell(row.status, widths.status)),
+            React.createElement(Text, null, ` ${padCell(row.runtime, widths.rt)} ${row.when}`)
+          );
+        })
+  );
+}
+
+function actionViewResultsByCheck(props) {
+  const [loadingChecks, setLoadingChecks] = React.useState(true);
+  const [error, setError] = React.useState('');
+  const [checks, setChecks] = React.useState([]);
+  const [selected, setSelected] = React.useState(null);
+  const [limitInput, setLimitInput] = React.useState('10');
+  const [loadingResults, setLoadingResults] = React.useState(false);
+  const [results, setResults] = React.useState([]);
+
+  React.useEffect(() => {
+    let active = true;
+    listChecks({ account: props.accountId })
+      .then((data) => {
+        if (!active) return;
+        setChecks(data);
+      })
+      .catch((err) => {
+        if (!active) return;
+        setError(err.message || 'Failed to load checks');
+      })
+      .finally(() => {
+        if (!active) return;
+        setLoadingChecks(false);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [props.accountId]);
+
+  useInput((input, key) => {
+    if (!loadingChecks && !loadingResults && results.length > 0 && (input === 'q' || key.escape)) {
+      props.onBack();
+    }
+  });
+
+  function submitLimit() {
+    const parsed = parseInt(limitInput, 10);
+    const limit = Number.isNaN(parsed) ? 10 : Math.max(1, parsed);
+
+    setLoadingResults(true);
+    getResults(selected.id, { account: props.accountId, limit })
+      .then((data) => {
+        setResults(data);
+      })
+      .catch((err) => {
+        setError(err.message || 'Failed to load results');
+      })
+      .finally(() => {
+        setLoadingResults(false);
+      });
+  }
+
+  if (loadingChecks) {
+    return React.createElement(LoadingScreen, {
+      title: 'Results > View by Check',
+      subtitle: props.accountText,
+      message: 'Loading checks...'
+    });
+  }
+
+  if (error) {
+    return React.createElement(ErrorScreen, {
+      title: 'Results > View by Check',
+      subtitle: props.accountText,
+      error,
+      onBack: props.onBack
+    });
+  }
+
+  if (!selected) {
+    return React.createElement(CheckMenu, {
+      title: 'Results > View by Check > Select Check',
+      accountText: props.accountText,
+      checks,
+      onSelect: setSelected,
+      onBack: props.onBack
+    });
+  }
+
+  if (loadingResults) {
+    return React.createElement(LoadingScreen, {
+      title: 'Results > View by Check',
+      subtitle: `${props.accountText} | ${selected.id}`,
+      message: 'Loading results...'
+    });
+  }
+
+  if (results.length === 0) {
+    return React.createElement(
+      ScreenFrame,
+      {
+        title: 'Results > View by Check',
+        subtitle: `${props.accountText} | ${selected.id}`,
+        help: 'Enter a limit and press Enter. Esc to go back.'
+      },
+      React.createElement(Text, null, `Selected: ${selected.label || selected.id}`),
+      React.createElement(Box, null,
+        React.createElement(Text, null, 'Limit: '),
+        React.createElement(TextInput, {
+          value: limitInput,
+          onChange: setLimitInput,
+          onSubmit: submitLimit
+        })
+      )
+    );
+  }
+
+  return React.createElement(
+    ScreenFrame,
+    {
+      title: 'Results > View by Check',
+      subtitle: `${props.accountText} | ${selected.id} | ${results.length} result(s)`,
+      help: 'Press q or Esc to go back.'
+    },
+    results.map((result, index) => {
+      const doc = result.doc || result;
+      const status = doc.su ? 'SUCCESS' : 'FAILURE';
+      const statusColor = doc.su ? 'green' : 'red';
+      const when = formatTimestamp(doc.s || doc.t);
+      const runtime = doc.rt !== undefined ? `${doc.rt}ms` : 'n/a';
+      const message = doc.m ? truncateText(doc.m, 96) : '';
+      return React.createElement(
+        Box,
+        { key: `${when}-${index}`, flexDirection: 'column', marginBottom: 1 },
+        React.createElement(Text, null, `${when} | Runtime: ${runtime}`),
+        React.createElement(Text, { color: statusColor }, status),
+        message ? React.createElement(Text, { color: 'gray' }, message) : null
+      );
+    })
+  );
+}
+
+function actionAccountInfo(props) {
+  const [loading, setLoading] = React.useState(true);
+  const [error, setError] = React.useState('');
+  const [accounts, setAccounts] = React.useState([]);
+
+  React.useEffect(() => {
+    let active = true;
+    listAccounts()
+      .then((data) => {
+        if (!active) return;
+        const list = Object.entries(data || {}).map(([id, account]) => ({ id, ...account }));
+        setAccounts(list);
+      })
+      .catch((err) => {
+        if (!active) return;
+        setError(err.message || 'Failed to load accounts');
+      })
+      .finally(() => {
+        if (!active) return;
+        setLoading(false);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useInput((input, key) => {
+    if (!loading && (input === 'q' || key.escape)) {
+      props.onBack();
+    }
+  });
+
+  if (loading) {
+    return React.createElement(LoadingScreen, {
+      title: 'Account > Account Info',
+      subtitle: props.accountText,
+      message: 'Loading account info...'
+    });
+  }
+
+  if (error) {
+    return React.createElement(ErrorScreen, {
+      title: 'Account > Account Info',
+      subtitle: props.accountText,
+      error,
+      onBack: props.onBack
+    });
+  }
+
+  return React.createElement(
+    ScreenFrame,
+    {
+      title: 'Account > Account Info',
+      subtitle: `${props.accountText} | ${accounts.length} account(s)`,
+      help: 'Press q or Esc to go back.'
+    },
+    accounts.length === 0
+      ? React.createElement(Text, { color: 'yellow' }, 'No subaccounts found.')
+      : accounts.map((account) => {
+          const statusColor = account.status === 'Active' ? 'green' : 'gray';
+          return React.createElement(
+            Box,
+            { key: account.id, flexDirection: 'column', marginBottom: 1 },
+            React.createElement(Text, { color: 'cyan' }, account.id),
+            React.createElement(Text, null, `  Name: ${account.name || 'Unnamed'}`),
+            React.createElement(Text, { color: statusColor }, `  Status: ${account.status || 'Unknown'}`),
+            account.parent ? React.createElement(Text, null, `  Parent: ${account.parent}`) : null
+          );
+        })
+  );
+}
+
+function App(props) {
+  const { exit } = useApp();
+  const [screen, setScreen] = React.useState('main');
+  const [accountId] = React.useState(props.initialAccountId || null);
+
+  React.useEffect(() => {
+    writeState({ lastAccountId: accountId });
+  }, [accountId]);
+
+  useInput((input, key) => {
+    if (key.ctrl && input === 'c') {
+      exit();
+    }
+  });
+
+  const accountText = accountId ? `Account: ${accountId}` : 'Account: default';
+
+  if (screen === 'main') {
+    return React.createElement(MenuScreen, {
+      title: 'NodePing CLI v1.3.0',
+      subtitle: accountText,
+      items: [
+        { label: 'Checks', value: 'checks' },
+        { label: 'Results', value: 'results' },
+        { label: 'Account', value: 'account' },
+        { label: 'Quit', value: 'quit' }
+      ],
+      onSelect: (value) => {
+        if (value === 'quit') {
+          exit();
+        } else {
+          setScreen(value);
+        }
+      },
+      onBack: exit,
+      help: 'Use up/down and Enter. q to quit.'
+    });
+  }
+
+  if (screen === 'checks') {
+    return React.createElement(MenuScreen, {
+      title: 'Checks',
+      subtitle: accountText,
+      items: [
+        { label: 'List All', value: 'checks-list' },
+        { label: 'Filter by Pattern', value: 'checks-filter' },
+        { label: 'View Details', value: 'checks-details' },
+        { label: 'Delete', value: 'checks-delete' },
+        { label: 'Back', value: 'main' }
+      ],
+      onSelect: (value) => setScreen(value),
+      onBack: () => setScreen('main')
+    });
+  }
+
+  if (screen === 'results') {
+    return React.createElement(MenuScreen, {
+      title: 'Results',
+      subtitle: accountText,
+      items: [
+        { label: 'View Recent Results', value: 'results-recent' },
+        { label: 'View by Check', value: 'results-by-check' },
+        { label: 'Back', value: 'main' }
+      ],
+      onSelect: (value) => setScreen(value),
+      onBack: () => setScreen('main')
+    });
+  }
+
+  if (screen === 'account') {
+    return React.createElement(MenuScreen, {
+      title: 'Account',
+      subtitle: accountText,
+      items: [
+        { label: 'Account Info', value: 'account-info' },
+        { label: 'Back', value: 'main' }
+      ],
+      onSelect: (value) => setScreen(value),
+      onBack: () => setScreen('main')
+    });
+  }
+
+  if (screen === 'checks-list') {
+    return React.createElement(actionListAllChecks, {
+      accountId,
+      accountText,
+      onBack: () => setScreen('checks')
+    });
+  }
+
+  if (screen === 'checks-filter') {
+    return React.createElement(actionFilterChecks, {
+      accountId,
+      accountText,
+      onBack: () => setScreen('checks')
+    });
+  }
+
+  if (screen === 'checks-details') {
+    return React.createElement(actionViewCheckDetails, {
+      accountId,
+      accountText,
+      onBack: () => setScreen('checks')
+    });
+  }
+
+  if (screen === 'checks-delete') {
+    return React.createElement(actionDeleteCheck, {
+      accountId,
+      accountText,
+      onBack: () => setScreen('checks')
+    });
+  }
+
+  if (screen === 'results-recent') {
+    return React.createElement(actionViewRecentResults, {
+      accountId,
+      accountText,
+      onBack: () => setScreen('results')
+    });
+  }
+
+  if (screen === 'results-by-check') {
+    return React.createElement(actionViewResultsByCheck, {
+      accountId,
+      accountText,
+      onBack: () => setScreen('results')
+    });
+  }
+
+  if (screen === 'account-info') {
+    return React.createElement(actionAccountInfo, {
+      accountId,
+      accountText,
+      onBack: () => setScreen('account')
+    });
+  }
+
+  return React.createElement(MenuScreen, {
+    title: 'NodePing CLI',
+    subtitle: accountText,
+    items: [{ label: 'Back to Main', value: 'main' }],
+    onSelect: () => setScreen('main'),
+    onBack: () => setScreen('main')
+  });
+}
+
+function printHelp() {
+  console.log(`NodePing TUI\n\nUsage:\n  nodeping\n  nodeping tui\n\nKeys:\n  Up/Down   Move selection\n  Enter     Select\n  q / Esc   Back / quit\n  Ctrl+C    Quit\n`);
+}
+
+async function runInkTui(args) {
+  const argv = Array.isArray(args) ? args : [];
+  if (argv.includes('--help') || argv.includes('-h')) {
     printHelp();
     return;
   }
 
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    throw new Error('Interactive TUI requires a TTY terminal');
+  }
+
   const state = readState();
-  render(<App initialAccountId={state.lastAccountId} />);
+  const app = render(React.createElement(App, { initialAccountId: state.lastAccountId }));
+  await app.waitUntilExit();
 }
 
 module.exports = {
-  runTui
+  runInkTui,
+  listChecks,
+  deleteCheck,
+  listAccounts,
+  getResults,
+  actionListAllChecks,
+  actionFilterChecks,
+  actionViewCheckDetails,
+  actionDeleteCheck,
+  actionViewRecentResults,
+  actionViewResultsByCheck,
+  actionAccountInfo,
+  selectMenu,
+  MenuScreen
 };

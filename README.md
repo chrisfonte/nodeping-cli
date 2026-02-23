@@ -57,19 +57,21 @@ Get your API token from: [https://nodeping.com/account.html](https://nodeping.co
 Launch the terminal UI:
 
 ```bash
+nodeping
 nodeping tui
 ```
 
 Keybindings:
 - `↑/↓` Move selection
-- `r` View recent results for the selected check
-- `e` Enable/disable the selected check
-- `n` Rename the selected check
-- `a` Switch account
-- `q` Quit
+- `Enter` Select menu item
+- `q` or `Esc` Back / quit current screen
+- `Ctrl+C` Quit immediately
 
-Notes:
-- Delete is intentionally not available in the MVP.
+TUI menus:
+- Main: `Checks`, `Results`, `Account`, `Quit`
+- Checks: `List All`, `Filter by Pattern`, `View Details`, `Delete`
+- Results: `View Recent Results`, `View by Check`
+- Account: `Account Info`
 
 ### List All Checks
 
