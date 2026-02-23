@@ -968,22 +968,31 @@ Keys:
 }
 
 function clearScreen() {
-  process.stdout.write('\x1b[2J\x1b[0f');
+  process.stdout.write('\x1b[2J\x1b[H');
 }
 
 function stripAnsi(text) {
-  return String(text).replace(/\x1b\[[0-9;]*m/g, '');
+  return String(text).replace(/[\u001B\u009B][[\]()#;?]*(?:(?:(?:\d{1,4}(?:;\d{0,4})*)?[\dA-PR-TZcf-ntqry=><~])|(?:[a-zA-Z]))/g, '');
 }
 
 function padCell(text, width) {
-  const plain = stripAnsi(text);
-  return String(text) + ' '.repeat(Math.max(0, width - plain.length));
+  const value = String(text ?? '');
+  const plainLength = stripAnsi(value).length;
+  return value + ' '.repeat(Math.max(0, width - plainLength));
 }
 
 function truncateText(text, maxLength) {
   const value = String(text || '');
-  if (value.length <= maxLength) return value;
-  return `${value.slice(0, maxLength - 3)}...`;
+  const chars = Array.from(value);
+  if (chars.length <= maxLength) return value;
+  if (maxLength <= 1) return '…';
+  return `${chars.slice(0, maxLength - 1).join('')}…`;
+}
+
+function setRawMode(enabled) {
+  if (process.stdin.isTTY && typeof process.stdin.setRawMode === 'function') {
+    process.stdin.setRawMode(enabled);
+  }
 }
 
 function printChecksTable(checks, heading = 'Checks') {
@@ -1022,28 +1031,28 @@ function printChecksTable(checks, heading = 'Checks') {
 }
 
 async function promptLine(questionText, defaultValue = '') {
-  if (process.stdin.isTTY) {
-    process.stdin.setRawMode(false);
-  }
+  const wasRaw = Boolean(process.stdin.isTTY && process.stdin.isRaw);
+  setRawMode(false);
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
   const promptText = defaultValue ? `${questionText} (${defaultValue}): ` : `${questionText}: `;
-  const answer = await new Promise((resolve) => rl.question(promptText, resolve));
-  rl.close();
-  return answer.trim() || defaultValue;
+  try {
+    const answer = await new Promise((resolve) => rl.question(promptText, resolve));
+    return answer.trim() || defaultValue;
+  } finally {
+    rl.close();
+    setRawMode(wasRaw);
+  }
 }
 
 async function waitForAnyKey(message = 'Press any key to return...') {
   process.stdout.write(`${colors.gray}${message}${colors.reset}`);
   await new Promise((resolve) => {
+    const wasRaw = Boolean(process.stdin.isTTY && process.stdin.isRaw);
     readline.emitKeypressEvents(process.stdin);
-    if (process.stdin.isTTY) {
-      process.stdin.setRawMode(true);
-    }
+    setRawMode(true);
     const onKey = () => {
       process.stdin.removeListener('keypress', onKey);
-      if (process.stdin.isTTY) {
-        process.stdin.setRawMode(false);
-      }
+      setRawMode(wasRaw);
       process.stdout.write('\n');
       resolve();
     };
@@ -1059,9 +1068,18 @@ async function selectMenu(title, options, config = {}) {
   let index = Math.min(Math.max(0, startIndex), Math.max(choices.length - 1, 0));
 
   return await new Promise((resolve) => {
+    const wasRaw = Boolean(process.stdin.isTTY && process.stdin.isRaw);
+    let cleanedUp = false;
+
     const render = () => {
       clearScreen();
+      console.log(`${colors.cyan}${colors.bright}NodePing CLI v${VERSION}${colors.reset}`);
       console.log(`${colors.bright}${title}${colors.reset}\n`);
+      if (choices.length === 0) {
+        console.log(`${colors.yellow}No options available.${colors.reset}`);
+        console.log(`\n${colors.gray}${config.footer || 'Press q to go back.'}${colors.reset}`);
+        return;
+      }
       choices.forEach((choice, idx) => {
         const selected = idx === index;
         const pointer = selected ? `${colors.green}▶${colors.reset}` : ' ';
@@ -1072,14 +1090,24 @@ async function selectMenu(title, options, config = {}) {
     };
 
     const cleanup = (result) => {
+      if (cleanedUp) return;
+      cleanedUp = true;
       process.stdin.removeListener('keypress', onKeyPress);
-      if (process.stdin.isTTY) {
-        process.stdin.setRawMode(false);
-      }
+      setRawMode(wasRaw);
       resolve(result);
     };
 
     const onKeyPress = (_, key = {}) => {
+      if (choices.length === 0) {
+        if (key.name === 'q' || key.name === 'escape' || key.name === 'return') {
+          cleanup(null);
+          return;
+        }
+        if (key.ctrl && key.name === 'c') {
+          cleanup('__quit__');
+        }
+        return;
+      }
       if (key.name === 'up') {
         index = index <= 0 ? choices.length - 1 : index - 1;
         render();
@@ -1104,9 +1132,7 @@ async function selectMenu(title, options, config = {}) {
     };
 
     readline.emitKeypressEvents(process.stdin);
-    if (process.stdin.isTTY) {
-      process.stdin.setRawMode(true);
-    }
+    setRawMode(true);
     render();
     process.stdin.on('keypress', onKeyPress);
   });
@@ -1292,82 +1318,88 @@ async function runTui() {
     }
   };
 
-  while (!shouldQuit) {
-    const mainChoice = await selectMenu('NodePing - Main Menu', [
-      { label: 'Checks', value: 'checks' },
-      { label: 'Results', value: 'results' },
-      { label: 'Account', value: 'account' },
-      { label: 'Quit', value: 'quit' }
-    ], {
-      footer: `Use ↑/↓ and Enter. Account: ${accountId || 'default'}`
-    });
+  try {
+    while (!shouldQuit) {
+      const mainChoice = await selectMenu('Main Menu', [
+        { label: 'Checks', value: 'checks' },
+        { label: 'Results', value: 'results' },
+        { label: 'Account', value: 'account' },
+        { label: 'Quit', value: 'quit' }
+      ], {
+        footer: `Use ↑/↓ and Enter. Account: ${accountId || 'default'}`
+      });
 
-    if (mainChoice === '__quit__' || mainChoice === 'quit' || mainChoice === null) {
-      shouldQuit = true;
-      continue;
-    }
-
-    if (mainChoice === 'checks') {
-      const checksChoice = await selectMenu('Checks', [
-        { label: 'List All', value: 'list' },
-        { label: 'Filter by Pattern', value: 'filter' },
-        { label: 'View Details', value: 'details' },
-        { label: 'Delete', value: 'delete' },
-        { label: 'Back', value: 'back' }
-      ]);
-
-      if (checksChoice === '__quit__') {
+      if (mainChoice === '__quit__' || mainChoice === 'quit' || mainChoice === null) {
         shouldQuit = true;
         continue;
       }
-      if (checksChoice === 'list') await runTuiAction(() => actionListAllChecks(accountId));
-      if (checksChoice === 'filter') await runTuiAction(() => actionFilterChecks(accountId));
-      if (checksChoice === 'details') {
-        const result = await runTuiAction(() => actionViewCheckDetails(accountId));
-        if (result === '__quit__') shouldQuit = true;
-      }
-      if (checksChoice === 'delete') {
-        const result = await runTuiAction(() => actionDeleteCheck(accountId));
-        if (result === '__quit__') shouldQuit = true;
-      }
-      continue;
-    }
 
-    if (mainChoice === 'results') {
-      const resultsChoice = await selectMenu('Results', [
-        { label: 'View Recent Results', value: 'recent' },
-        { label: 'View by Check', value: 'byCheck' },
-        { label: 'Back', value: 'back' }
-      ]);
+      if (mainChoice === 'checks') {
+        const checksChoice = await selectMenu('Checks', [
+          { label: 'List All', value: 'list' },
+          { label: 'Filter by Pattern', value: 'filter' },
+          { label: 'View Details', value: 'details' },
+          { label: 'Delete', value: 'delete' },
+          { label: 'Back', value: 'back' }
+        ]);
 
-      if (resultsChoice === '__quit__') {
-        shouldQuit = true;
+        if (checksChoice === '__quit__') {
+          shouldQuit = true;
+          continue;
+        }
+        if (checksChoice === 'list') await runTuiAction(() => actionListAllChecks(accountId));
+        if (checksChoice === 'filter') await runTuiAction(() => actionFilterChecks(accountId));
+        if (checksChoice === 'details') {
+          const result = await runTuiAction(() => actionViewCheckDetails(accountId));
+          if (result === '__quit__') shouldQuit = true;
+        }
+        if (checksChoice === 'delete') {
+          const result = await runTuiAction(() => actionDeleteCheck(accountId));
+          if (result === '__quit__') shouldQuit = true;
+        }
         continue;
       }
-      if (resultsChoice === 'recent') await runTuiAction(() => actionViewRecentResults(accountId));
-      if (resultsChoice === 'byCheck') {
-        const result = await runTuiAction(() => actionViewResultsByCheck(accountId));
-        if (result === '__quit__') shouldQuit = true;
-      }
-      continue;
-    }
 
-    if (mainChoice === 'account') {
-      const accountChoice = await selectMenu('Account', [
-        { label: 'Account Info', value: 'info' },
-        { label: 'Back', value: 'back' }
-      ]);
+      if (mainChoice === 'results') {
+        const resultsChoice = await selectMenu('Results', [
+          { label: 'View Recent Results', value: 'recent' },
+          { label: 'View by Check', value: 'byCheck' },
+          { label: 'Back', value: 'back' }
+        ]);
 
-      if (accountChoice === '__quit__') {
-        shouldQuit = true;
+        if (resultsChoice === '__quit__') {
+          shouldQuit = true;
+          continue;
+        }
+        if (resultsChoice === 'recent') await runTuiAction(() => actionViewRecentResults(accountId));
+        if (resultsChoice === 'byCheck') {
+          const result = await runTuiAction(() => actionViewResultsByCheck(accountId));
+          if (result === '__quit__') shouldQuit = true;
+        }
         continue;
       }
-      if (accountChoice === 'info') await runTuiAction(() => actionAccountInfo(accountId));
-      continue;
+
+      if (mainChoice === 'account') {
+        const accountChoice = await selectMenu('Account', [
+          { label: 'Account Info', value: 'info' },
+          { label: 'Back', value: 'back' }
+        ]);
+
+        if (accountChoice === '__quit__') {
+          shouldQuit = true;
+          continue;
+        }
+        if (accountChoice === 'info') await runTuiAction(() => actionAccountInfo(accountId));
+      }
     }
+  } finally {
+    setRawMode(false);
+    process.stdin.pause();
+    if (typeof process.stdin.unref === 'function') {
+      process.stdin.unref();
+    }
+    clearScreen();
   }
-
-  clearScreen();
 }
 
 // Main CLI router
