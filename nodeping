@@ -18,6 +18,7 @@ const https = require('https');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const readline = require('readline');
 
 const VERSION = '1.3.0';
 const API_BASE = 'api.nodeping.com';
@@ -847,6 +848,7 @@ function printUsage() {
   console.log(`${colors.bright}NodePing CLI v${VERSION}${colors.reset}
 
 ${colors.bright}Usage:${colors.reset}
+  nodeping
   nodeping checks list [--filter PATTERN] [--account ID] [--json]
   nodeping checks delete <id> [--force] [--account ID]
   nodeping checks delete --filter PATTERN [--dry-run] [--force] [--account ID]
@@ -864,6 +866,7 @@ ${colors.bright}Usage:${colors.reset}
   nodeping --help
 
 ${colors.bright}Commands:${colors.reset}
+  ${colors.cyan}(no args)${colors.reset}               Launch the interactive TUI menu
   ${colors.cyan}checks list${colors.reset}              List all monitoring checks
   ${colors.cyan}checks delete <id>${colors.reset}       Delete a specific check by ID
   ${colors.cyan}checks delete --filter${colors.reset}   Bulk delete checks matching pattern
@@ -953,18 +956,418 @@ function printTuiHelp() {
   console.log(`NodePing TUI
 
 Usage:
+  nodeping
   nodeping tui
 
 Keys:
   ↑/↓    Move selection
-  r      View recent results
-  e      Enable/disable selected check
-  n      Rename selected check
-  a      Switch account
-  q      Quit
+  Enter  Select menu item
+  q      Back / quit
+  Ctrl+C Quit
+`);
+}
 
-Notes:
-  Delete is not available in the MVP.`);
+function clearScreen() {
+  process.stdout.write('\x1b[2J\x1b[0f');
+}
+
+function stripAnsi(text) {
+  return String(text).replace(/\x1b\[[0-9;]*m/g, '');
+}
+
+function padCell(text, width) {
+  const plain = stripAnsi(text);
+  return String(text) + ' '.repeat(Math.max(0, width - plain.length));
+}
+
+function truncateText(text, maxLength) {
+  const value = String(text || '');
+  if (value.length <= maxLength) return value;
+  return `${value.slice(0, maxLength - 3)}...`;
+}
+
+function printChecksTable(checks, heading = 'Checks') {
+  console.log(`${colors.bright}${heading}${colors.reset}`);
+  if (!checks || checks.length === 0) {
+    console.log(`${colors.yellow}No checks found.${colors.reset}`);
+    return;
+  }
+
+  const rows = checks.map((check) => {
+    const status = check.state === 1 ? `${colors.green}PASS${colors.reset}` : `${colors.red}FAIL${colors.reset}`;
+    const enabled = check.enable === 'active' ? `${colors.green}active${colors.reset}` : `${colors.gray}inactive${colors.reset}`;
+    return [
+      check.id || '',
+      truncateText(check.label || '', 24),
+      check.type || '',
+      truncateText(check.parameters?.target || '', 36),
+      status,
+      enabled,
+      `${check.interval || ''}`
+    ];
+  });
+
+  const headers = ['ID', 'Label', 'Type', 'Target', 'State', 'Enabled', 'Int'];
+  const widths = headers.map((header, i) =>
+    Math.max(header.length, ...rows.map((row) => stripAnsi(row[i]).length))
+  );
+
+  const separator = widths.map((w) => '-'.repeat(w)).join('-+-');
+  const formatRow = (columns) => columns.map((col, i) => padCell(col, widths[i])).join(' | ');
+
+  console.log(`${colors.cyan}${formatRow(headers)}${colors.reset}`);
+  console.log(`${colors.gray}${separator}${colors.reset}`);
+  rows.forEach((row) => console.log(formatRow(row)));
+  console.log('');
+}
+
+async function promptLine(questionText, defaultValue = '') {
+  if (process.stdin.isTTY) {
+    process.stdin.setRawMode(false);
+  }
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  const promptText = defaultValue ? `${questionText} (${defaultValue}): ` : `${questionText}: `;
+  const answer = await new Promise((resolve) => rl.question(promptText, resolve));
+  rl.close();
+  return answer.trim() || defaultValue;
+}
+
+async function waitForAnyKey(message = 'Press any key to return...') {
+  process.stdout.write(`${colors.gray}${message}${colors.reset}`);
+  await new Promise((resolve) => {
+    readline.emitKeypressEvents(process.stdin);
+    if (process.stdin.isTTY) {
+      process.stdin.setRawMode(true);
+    }
+    const onKey = () => {
+      process.stdin.removeListener('keypress', onKey);
+      if (process.stdin.isTTY) {
+        process.stdin.setRawMode(false);
+      }
+      process.stdout.write('\n');
+      resolve();
+    };
+    process.stdin.once('keypress', onKey);
+  });
+}
+
+async function selectMenu(title, options, config = {}) {
+  const choices = options.map((option) => (
+    typeof option === 'string' ? { label: option, value: option } : option
+  ));
+  const startIndex = config.startIndex || 0;
+  let index = Math.min(Math.max(0, startIndex), Math.max(choices.length - 1, 0));
+
+  return await new Promise((resolve) => {
+    const render = () => {
+      clearScreen();
+      console.log(`${colors.bright}${title}${colors.reset}\n`);
+      choices.forEach((choice, idx) => {
+        const selected = idx === index;
+        const pointer = selected ? `${colors.green}▶${colors.reset}` : ' ';
+        const label = selected ? `${colors.bright}${choice.label}${colors.reset}` : choice.label;
+        console.log(`${pointer} ${label}`);
+      });
+      console.log(`\n${colors.gray}${config.footer || 'Use ↑/↓ and Enter. Press q to go back.'}${colors.reset}`);
+    };
+
+    const cleanup = (result) => {
+      process.stdin.removeListener('keypress', onKeyPress);
+      if (process.stdin.isTTY) {
+        process.stdin.setRawMode(false);
+      }
+      resolve(result);
+    };
+
+    const onKeyPress = (_, key = {}) => {
+      if (key.name === 'up') {
+        index = index <= 0 ? choices.length - 1 : index - 1;
+        render();
+        return;
+      }
+      if (key.name === 'down') {
+        index = index >= choices.length - 1 ? 0 : index + 1;
+        render();
+        return;
+      }
+      if (key.name === 'return') {
+        cleanup(choices[index]?.value ?? null);
+        return;
+      }
+      if (key.name === 'q' || key.name === 'escape') {
+        cleanup(null);
+        return;
+      }
+      if (key.ctrl && key.name === 'c') {
+        cleanup('__quit__');
+      }
+    };
+
+    readline.emitKeypressEvents(process.stdin);
+    if (process.stdin.isTTY) {
+      process.stdin.setRawMode(true);
+    }
+    render();
+    process.stdin.on('keypress', onKeyPress);
+  });
+}
+
+function getCheckMenuOptions(checks) {
+  if (!checks || checks.length === 0) return [];
+  return checks.map((check) => ({
+    label: `${check.label || '(unlabeled)'} ${colors.gray}[${check.id}]${colors.reset}`,
+    value: check
+  }));
+}
+
+async function promptForCheck(accountId) {
+  const checks = await listChecks({ json: true, account: accountId });
+  const options = getCheckMenuOptions(checks);
+  if (options.length === 0) return null;
+  return await selectMenu('Select Check', options, {
+    footer: 'Use ↑/↓ and Enter. Press q to cancel.'
+  });
+}
+
+async function actionListAllChecks(accountId) {
+  clearScreen();
+  const checks = await listChecks({ json: true, account: accountId });
+  printChecksTable(checks, `All Checks${accountId ? ` (Account: ${accountId})` : ''}`);
+  await waitForAnyKey();
+}
+
+async function actionFilterChecks(accountId) {
+  clearScreen();
+  const pattern = await promptLine('Filter pattern');
+  if (!pattern) return;
+  const checks = await listChecks({ json: true, filter: pattern, account: accountId });
+  printChecksTable(checks, `Checks matching "${pattern}"`);
+  await waitForAnyKey();
+}
+
+async function actionViewCheckDetails(accountId) {
+  const selected = await promptForCheck(accountId);
+  if (!selected || selected === '__quit__') return selected;
+  clearScreen();
+  console.log(`${colors.bright}Check Details${colors.reset}\n`);
+  console.log(JSON.stringify(selected, null, 2));
+  console.log('');
+  await waitForAnyKey();
+  return null;
+}
+
+async function actionDeleteCheck(accountId) {
+  const selected = await promptForCheck(accountId);
+  if (!selected || selected === '__quit__') return selected;
+  const confirm = await selectMenu(`Delete check "${selected.label}"?`, [
+    { label: 'No', value: 'no' },
+    { label: `${colors.red}Yes, delete${colors.reset}`, value: 'yes' }
+  ], {
+    footer: 'Use ↑/↓ and Enter. Press q to cancel.'
+  });
+
+  if (confirm !== 'yes') return null;
+  clearScreen();
+  await deleteCheck(selected.id, true, accountId);
+  console.log('');
+  await waitForAnyKey();
+  return null;
+}
+
+function parseLatestResult(rawResult) {
+  if (!rawResult) return null;
+  const entry = Array.isArray(rawResult) ? rawResult[0] : rawResult;
+  return entry && (entry.doc || entry);
+}
+
+async function actionViewRecentResults(accountId) {
+  clearScreen();
+  const countText = await promptLine('How many checks to scan for recent results', '10');
+  const count = Math.max(1, parseInt(countText, 10) || 10);
+  const checks = await listChecks({ json: true, account: accountId });
+  const limitedChecks = checks.slice(0, count);
+  const rows = [];
+
+  for (const check of limitedChecks) {
+    try {
+      const result = await apiRequest('GET', `/results/${check.id}?limit=1`, null, accountId);
+      const doc = parseLatestResult(result);
+      const status = doc?.su ? `${colors.green}SUCCESS${colors.reset}` : `${colors.red}FAIL${colors.reset}`;
+      const runtime = doc?.rt !== undefined ? `${doc.rt}` : '';
+      const when = doc?.s || doc?.t ? new Date(doc.s || doc.t).toISOString() : '';
+      rows.push([
+        truncateText(check.label || '', 24),
+        check.id,
+        status,
+        runtime,
+        when
+      ]);
+    } catch (err) {
+      rows.push([
+        truncateText(check.label || '', 24),
+        check.id,
+        `${colors.red}ERROR${colors.reset}`,
+        '',
+        truncateText(err.message, 28)
+      ]);
+    }
+  }
+
+  clearScreen();
+  console.log(`${colors.bright}Recent Results${colors.reset}\n`);
+  if (rows.length === 0) {
+    console.log(`${colors.yellow}No checks found.${colors.reset}\n`);
+    await waitForAnyKey();
+    return;
+  }
+
+  const headers = ['Label', 'ID', 'Status', 'RT(ms)', 'When'];
+  const widths = headers.map((header, i) =>
+    Math.max(header.length, ...rows.map((row) => stripAnsi(row[i]).length))
+  );
+  const line = widths.map((w) => '-'.repeat(w)).join('-+-');
+  const formatRow = (cols) => cols.map((col, i) => padCell(col, widths[i])).join(' | ');
+
+  console.log(`${colors.cyan}${formatRow(headers)}${colors.reset}`);
+  console.log(`${colors.gray}${line}${colors.reset}`);
+  rows.forEach((row) => console.log(formatRow(row)));
+  console.log('');
+  await waitForAnyKey();
+}
+
+async function actionViewResultsByCheck(accountId) {
+  const selected = await promptForCheck(accountId);
+  if (!selected || selected === '__quit__') return selected;
+  clearScreen();
+  const limitText = await promptLine(`Result limit for ${selected.label}`, '10');
+  const limit = Math.max(1, parseInt(limitText, 10) || 10);
+  clearScreen();
+  await getResults(selected.id, { account: accountId, limit });
+  await waitForAnyKey();
+  return null;
+}
+
+async function actionAccountInfo(accountId) {
+  clearScreen();
+  const accounts = await apiRequest('GET', '/accounts');
+  const accountList = Object.entries(accounts).map(([id, account]) => ({ id, ...account }));
+  console.log(`${colors.bright}Account Info${colors.reset}\n`);
+  if (accountId) {
+    console.log(`Current account scope: ${colors.cyan}${accountId}${colors.reset}\n`);
+  } else {
+    console.log(`Current account scope: ${colors.cyan}default${colors.reset}\n`);
+  }
+  if (accountList.length === 0) {
+    console.log(`${colors.yellow}No subaccounts found.${colors.reset}\n`);
+  } else {
+    accountList.forEach((account) => {
+      const status = account.status === 'Active' ? `${colors.green}Active${colors.reset}` : `${colors.gray}${account.status}${colors.reset}`;
+      console.log(`${colors.cyan}${account.id}${colors.reset}`);
+      console.log(`  Name: ${colors.bright}${account.name || 'Unnamed'}${colors.reset}`);
+      console.log(`  Status: ${status}`);
+      if (account.parent) {
+        console.log(`  Parent: ${account.parent}`);
+      }
+      console.log('');
+    });
+  }
+  await waitForAnyKey();
+}
+
+async function runTui() {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    throw new Error('Interactive TUI requires a TTY terminal');
+  }
+
+  let shouldQuit = false;
+  let accountId = null;
+  const runTuiAction = async (action) => {
+    try {
+      return await action();
+    } catch (err) {
+      clearScreen();
+      console.error(`${colors.red}Error:${colors.reset} ${err.message}\n`);
+      await waitForAnyKey();
+      return null;
+    }
+  };
+
+  while (!shouldQuit) {
+    const mainChoice = await selectMenu('NodePing - Main Menu', [
+      { label: 'Checks', value: 'checks' },
+      { label: 'Results', value: 'results' },
+      { label: 'Account', value: 'account' },
+      { label: 'Quit', value: 'quit' }
+    ], {
+      footer: `Use ↑/↓ and Enter. Account: ${accountId || 'default'}`
+    });
+
+    if (mainChoice === '__quit__' || mainChoice === 'quit' || mainChoice === null) {
+      shouldQuit = true;
+      continue;
+    }
+
+    if (mainChoice === 'checks') {
+      const checksChoice = await selectMenu('Checks', [
+        { label: 'List All', value: 'list' },
+        { label: 'Filter by Pattern', value: 'filter' },
+        { label: 'View Details', value: 'details' },
+        { label: 'Delete', value: 'delete' },
+        { label: 'Back', value: 'back' }
+      ]);
+
+      if (checksChoice === '__quit__') {
+        shouldQuit = true;
+        continue;
+      }
+      if (checksChoice === 'list') await runTuiAction(() => actionListAllChecks(accountId));
+      if (checksChoice === 'filter') await runTuiAction(() => actionFilterChecks(accountId));
+      if (checksChoice === 'details') {
+        const result = await runTuiAction(() => actionViewCheckDetails(accountId));
+        if (result === '__quit__') shouldQuit = true;
+      }
+      if (checksChoice === 'delete') {
+        const result = await runTuiAction(() => actionDeleteCheck(accountId));
+        if (result === '__quit__') shouldQuit = true;
+      }
+      continue;
+    }
+
+    if (mainChoice === 'results') {
+      const resultsChoice = await selectMenu('Results', [
+        { label: 'View Recent Results', value: 'recent' },
+        { label: 'View by Check', value: 'byCheck' },
+        { label: 'Back', value: 'back' }
+      ]);
+
+      if (resultsChoice === '__quit__') {
+        shouldQuit = true;
+        continue;
+      }
+      if (resultsChoice === 'recent') await runTuiAction(() => actionViewRecentResults(accountId));
+      if (resultsChoice === 'byCheck') {
+        const result = await runTuiAction(() => actionViewResultsByCheck(accountId));
+        if (result === '__quit__') shouldQuit = true;
+      }
+      continue;
+    }
+
+    if (mainChoice === 'account') {
+      const accountChoice = await selectMenu('Account', [
+        { label: 'Account Info', value: 'info' },
+        { label: 'Back', value: 'back' }
+      ]);
+
+      if (accountChoice === '__quit__') {
+        shouldQuit = true;
+        continue;
+      }
+      if (accountChoice === 'info') await runTuiAction(() => actionAccountInfo(accountId));
+      continue;
+    }
+  }
+
+  clearScreen();
 }
 
 // Main CLI router
@@ -973,8 +1376,13 @@ async function main() {
   const command = args[0];
   
   if (args.length === 0) {
-    printUsage();
-    process.exit(0);
+    try {
+      await runTui();
+      process.exit(0);
+    } catch (err) {
+      console.error(`${colors.red}Error:${colors.reset} ${err.message}`);
+      process.exit(1);
+    }
   }
   
   if (args.includes('--version') || args.includes('-v')) {
@@ -1154,8 +1562,7 @@ async function main() {
         printTuiHelp();
         process.exit(0);
       }
-      const { runTui } = require('./src/tui');
-      await runTui(args.slice(1));
+      await runTui();
     } else {
       console.error(`${colors.red}Error:${colors.reset} Unknown command: ${command} ${subcommand || ''}`);
       console.error(`Run ${colors.cyan}nodeping --help${colors.reset} for usage information`);
