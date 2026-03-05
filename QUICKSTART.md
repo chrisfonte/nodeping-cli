@@ -1,154 +1,106 @@
 # Quick Start Guide
 
-Get up and running with NodePing CLI in 5 minutes.
+Get up and running with the NodePing CLI in 5 minutes.
 
 ## 1. Install
 
 ```bash
-git clone https://github.com/chrisfonte/nodeping-cli.git
-cd nodeping-cli
-chmod +x nodeping
+npm install -g nodeping-cli
 ```
 
-Optionally, add to your PATH:
+Or clone from source:
 
 ```bash
-sudo ln -s $(pwd)/nodeping /usr/local/bin/nodeping
+git clone https://github.com/chrisfonte/nodeping-cli.git
+cd nodeping-cli
+npm link
 ```
 
-## 2. Configure Authentication
+## 2. Configure
 
-Create your credentials file:
+Get your API token from [NodePing Account Settings](https://nodeping.com/account.html), then:
 
 ```bash
 mkdir -p ~/.credentials/nodeping
 echo "YOUR_API_TOKEN_HERE" > ~/.credentials/nodeping/api_token
 ```
 
-Get your API token from: https://nodeping.com/account.html
-
-## 3. Verify Installation
+## 3. Verify
 
 ```bash
 nodeping --version
-nodeping --help
+# → nodeping v2.0.0
+
+nodeping accounts list
+# Shows your accounts and subaccounts
 ```
 
-## 4. Basic Commands
-
-### List all your checks
+## 4. Explore Your Checks
 
 ```bash
+# List all checks in the primary account
 nodeping checks list
+
+# List checks for a subaccount (by name!)
+nodeping checks list --account "My Company"
+
+# Filter checks
+nodeping checks list --filter "production"
+
+# Get results for a check
+nodeping results CHECK_ID --limit 5
+
+# Get an account summary
+nodeping info --account "My Company"
 ```
 
-### Filter checks
+## 5. Create a Check
 
 ```bash
-# Find all SR station checks
-nodeping checks list --filter "SR"
+# HTTP check
+nodeping checks create --type HTTP --label "Homepage" --target https://example.com --interval 5
 
-# Find all AUDIO type checks
-nodeping checks list --filter "AUDIO"
+# PING check
+nodeping checks create --type PING --label "Server" --target 192.168.1.1
+
+# SSL certificate check
+nodeping checks create --type SSL --label "SSL Cert" --target example.com --param warningdays=30
 ```
 
-### Preview bulk deletion
+## 6. Manage Contacts
 
 ```bash
-# See what would be deleted (dry-run)
-nodeping checks delete --filter "SR" --dry-run
+# List notification contacts
+nodeping contacts list
+
+# Create a contact
+nodeping contacts create --name "Ops Team" --email ops@example.com
+
+# List schedules
+nodeping schedules list
 ```
 
-### Execute bulk deletion
+## 7. Bulk Operations
 
 ```bash
-# Actually delete matching checks (requires --force)
-nodeping checks delete --filter "SR" --force
+# Preview what would be deleted (safe!)
+nodeping checks delete --filter "staging" --dry-run
+
+# Actually delete (requires --force)
+nodeping checks delete --filter "staging" --force
 ```
 
-### View check results
+## 8. Interactive Mode
+
+Just run `nodeping` with no arguments to launch the interactive TUI:
 
 ```bash
-# Get recent results for a specific check
-nodeping results YOUR_CHECK_ID
-
-# Get more results
-nodeping results YOUR_CHECK_ID --limit 25
-```
-
-## 5. SR Station Shutdown Workflow
-
-For the SR station shutdown project:
-
-```bash
-# Step 1: Audit current SR checks
-nodeping checks list --filter "SR" > sr-audit-before.txt
-
-# Step 2: Preview deletion
-nodeping checks delete --filter "SR" --dry-run
-
-# Step 3: Execute deletion (when ready)
-nodeping checks delete --filter "SR" --force
-
-# Step 4: Verify deletion
-nodeping checks list --filter "SR" > sr-audit-after.txt
-```
-
-## Common Patterns
-
-### Get JSON output for scripting
-
-```bash
-nodeping checks list --filter "SR" --json | jq '.[] | {id, label, type}'
-```
-
-### Count matching checks
-
-```bash
-nodeping checks list --filter "SR" --json | jq '. | length'
-```
-
-### Delete a single check
-
-```bash
-nodeping checks delete CHECK_ID_HERE --force
-```
-
-## Safety Features
-
-- `--dry-run` — Preview bulk deletions before executing
-- `--force` — Required for all deletions to prevent accidents
-- Pattern matching — Only delete exactly what matches your filter
-
-## Troubleshooting
-
-### "Could not read API token"
-
-Make sure the credentials file exists and contains your token:
-
-```bash
-cat ~/.credentials/nodeping/api_token
-```
-
-### "HTTP 403" error
-
-Your API token is invalid or expired. Get a fresh token from your NodePing account settings.
-
-### "No checks found matching filter"
-
-Your filter pattern didn't match any checks. Try:
-
-```bash
-nodeping checks list --json | jq '.[] | .label'
+nodeping
 ```
 
 ## Next Steps
 
-- Read the full [README](README.md) for detailed documentation
-- Check the [NodePing API docs](https://nodeping.com/docs-api-overview.html)
-- Review [CHANGELOG](CHANGELOG.md) for version history
-
-## Getting Help
-
-- CLI issues: https://github.com/chrisfonte/nodeping-cli/issues
-- NodePing API support: support@nodeping.com
+- See the full [README.md](README.md) for all commands and options
+- Check [examples/](examples/) for scripting examples
+- Use `--json` for machine-readable output
+- Use `--account "Name"` to target subaccounts by name

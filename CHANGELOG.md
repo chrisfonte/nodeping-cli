@@ -2,94 +2,76 @@
 
 All notable changes to this project will be documented in this file.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [2.0.0] - 2026-03-05
+
+### Added
+
+- **Account name resolution** — `--account "My Company"` now works alongside account IDs. Partial name matching supported.
+- **Contacts management** — `contacts list`, `contacts get`, `contacts create`, `contacts update`, `contacts delete` commands.
+- **Schedules management** — `schedules list`, `schedules get`, `schedules create`, `schedules delete` commands.
+- **Account info command** — `info` shows account summary with check type breakdown.
+- **Notification settings on check creation** — `--contact ID[:DELAY[:SCHEDULE]]` and `--location LOC` flags.
+- **Extended check type support** — PING, DNS, SSL, PORT types documented with examples (all types work via `--type`).
+- **Professional documentation** — Comprehensive README, QUICKSTART guide, and examples.
+- **Improved error messages** — Unknown options now suggest `--help`, account resolution errors show available accounts.
+
+### Changed
+
+- Version bumped to 2.0.0 (breaking: account resolution behavior).
+- URL encoding for API token and account IDs in requests (fixes issues with special characters).
+- Help text rewritten with grouped commands, all options documented, and copy-pasteable examples.
+- PII removed from all documentation and examples.
+
+### Fixed
+
+- `--account "Name With Spaces"` no longer causes "unescaped characters" error.
+- POST/PUT request body encoding now correctly sends data.
 
 ## [1.3.0] - 2026-02-22
 
 ### Added
-- Interactive Ink-based TUI (`nodeping tui`) with account picker, check list, details pane, and results view
-- Safe TUI actions for enable/disable and rename (delete remains unavailable)
-- Local state persistence for last-used account in `~/.config/nodeping-cli/state.json`
 
-### Changed
-- Updated README and CLI help to document the TUI command and keybindings
+- Interactive TUI with Ink (React-based terminal UI).
+- Account picker, checks browser, results viewer in TUI.
+- Enable/disable and rename operations in TUI.
 
 ## [1.2.0] - 2026-02-22
 
 ### Added
-- **Write operations**: `checks create`, `checks update`, `checks enable/disable`, and `checks rename`
-- **Sync workflow**: `sync plan` and `sync apply` for desired-state management
-- **Normalization engine**: target normalization for edge/origin endpoints and stream suffix variants
-- **Offline sync planning**: `--current` flag to plan against a local checks JSON file
-- **Extended tests**: sync plan determinism and normalization unit tests
 
-### Changed
-- CLI help and README updated to document write and sync operations
+- `checks create` — Create new checks (HTTP, AUDIO types).
+- `checks update` — Update check label, interval, parameters.
+- `checks enable` / `checks disable` — Toggle checks without deletion.
+- `checks rename` — Update check labels.
+- `sync plan` / `sync apply` — Declarative check management from JSON files.
+- URL normalization for sync comparison (edge/origin, stream suffixes).
 
 ## [1.1.1] - 2026-02-22
 
 ### Fixed
-- Bulk delete dry-run now respects `--account` when filtering checks
+
+- Bulk delete now correctly respects `--account` flag.
 
 ## [1.1.0] - 2026-02-22
 
 ### Added
-- **Subaccount support**: `--account` flag to specify customerid for all commands
-- **`accounts list` command**: View all subaccounts with status and details
-- **Comprehensive error handling**: Specific error messages for authentication, network, and API errors
-- **Test suite**: Basic automated tests covering CLI functionality (`node test.js`)
-- **GitHub templates**: Issue templates (bug report, feature request) and PR template
-- **CONTRIBUTING.md**: Comprehensive contribution guide with development workflow
-- **Enhanced help text**: All commands now documented with examples
-- **npx support**: Can be run with `npx nodeping-cli` after publishing
 
-### Fixed
-- **Results command bug**: Fixed date parsing error in `results` command (API response structure mismatch)
-- **Error messages**: Improved error messages for all failure modes (401, 403, 404, network errors)
-- **PII removal**: Genericized all hardcoded user paths in SR_CLEANUP_INSTRUCTIONS.md
+- Bulk delete with `--filter` pattern.
+- `--dry-run` mode for previewing bulk operations.
+- `--force` flag for confirming destructive operations.
 
-### Changed
-- Updated `package.json` with proper npm metadata, keywords, and test script
-- Version bumped to 1.1.0 for production-ready release
-- Enhanced README with subaccount examples
-- Improved help text consistency across all subcommands
-
-### Technical Improvements
-- Better API response handling with nested doc structure support
-- Network error detection (ENOTFOUND, ECONNREFUSED)
-- HTTP status code specific error messages
-- Account ID parameter support in all API requests
-
-### Documentation
-- Added cross-references to NodePing API research documentation (internal)
-- Updated examples with subaccount usage patterns
-- Professional tone audit across all documentation
-
-## [1.0.0] - 2026-02-21
+## [1.0.0] - 2026-02-22
 
 ### Added
-- Initial release of NodePing CLI
-- `checks list` command with filtering support
-- `checks delete` command for single check deletion
-- `checks delete --filter` for bulk deletion with dry-run mode
-- `results` command to view check results
-- JSON output mode for all commands
-- Color-coded terminal output for better readability
-- Zero external dependencies (Node.js stdlib only)
-- Single-file CLI for easy deployment
-- MIT License
-- Comprehensive README with examples
 
-### Features
-- Regex-based filtering on check label, target, and type
-- Dry-run mode to preview bulk deletions before executing
-- Safety flags (`--force`) to prevent accidental deletions
-- Configurable result limits
-- Human-readable and JSON output formats
-- Credential management via `~/.credentials/nodeping/api_token`
-
-### Use Case
-- Built specifically for SR station shutdown project
-- Enables bulk deletion of 180 AUDIO monitoring checks
-- Provides audit trail and dry-run capabilities for safe operations
+- Initial release.
+- `checks list` with `--filter` and `--json` support.
+- `checks delete` for single check deletion.
+- `accounts list` for viewing subaccounts.
+- `results` for viewing check results with `--limit`.
+- Subaccount support via `--account` flag (ID only).
+- Color-coded terminal output.
+- API token from `~/.credentials/nodeping/api_token`.

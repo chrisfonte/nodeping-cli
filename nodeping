@@ -3,13 +3,34 @@
 /**
  * NodePing CLI
  * A command-line interface for the NodePing monitoring API
- * 
+ *
  * Usage:
  *   nodeping checks list [--filter PATTERN] [--json]
  *   nodeping checks delete <id> [--force]
  *   nodeping checks delete --filter PATTERN [--dry-run] [--force]
- *   nodeping results <check-id> [--limit N]
- * 
+ *   nodeping checks create --type TYPE --label LABEL --target TARGET [options]
+ *   nodeping checks update <id> [options]
+ *   nodeping checks enable <id>
+ *   nodeping checks disable <id>
+ *   nodeping checks rename <id> <newLabel>
+ *   nodeping contacts list [--account ID|NAME] [--json]
+ *   nodeping contacts get <id> [--account ID|NAME] [--json]
+ *   nodeping contacts create --name NAME [--account ID|NAME] [--json]
+ *   nodeping contacts update <id> --name NAME [--account ID|NAME] [--json]
+ *   nodeping contacts delete <id> [--force] [--account ID|NAME]
+ *   nodeping schedules list [--account ID|NAME] [--json]
+ *   nodeping schedules get <id> [--account ID|NAME] [--json]
+ *   nodeping schedules create <id> --data <json> [--account ID|NAME] [--json]
+ *   nodeping schedules delete <id> [--force] [--account ID|NAME]
+ *   nodeping accounts list [--json]
+ *   nodeping results <check-id> [--limit N] [--json] [--account ID|NAME]
+ *   nodeping sync plan --desired <file> [--normalize] [--json] [--account ID|NAME]
+ *   nodeping sync apply --desired <file> [--normalize] --force [--account ID|NAME]
+ *   nodeping info [--account ID|NAME] [--json]
+ *   nodeping tui
+ *   nodeping --version
+ *   nodeping --help
+ *
  * Authentication:
  *   Reads API token from ~/.credentials/nodeping/api_token
  */
@@ -20,7 +41,7 @@ const path = require('path');
 const os = require('os');
 const readline = require('readline');
 
-const VERSION = '1.3.0';
+const VERSION = '2.0.0';
 const API_BASE = 'api.nodeping.com';
 const API_VERSION = '/api/1';
 
@@ -40,7 +61,7 @@ const colors = {
 // Read API token from credentials file
 function getApiToken() {
   const tokenPath = path.join(os.homedir(), '.credentials', 'nodeping', 'api_token');
-  
+
   try {
     const token = fs.readFileSync(tokenPath, 'utf8').trim();
     if (!token) {
@@ -58,38 +79,36 @@ function getApiToken() {
 function apiRequest(method, endpoint, data = null, accountId = null) {
   return new Promise((resolve, reject) => {
     const token = getApiToken();
-    
-    let path = `${API_VERSION}${endpoint}${endpoint.includes('?') ? '&' : '?'}token=${token}`;
+
+    let reqPath = `${API_VERSION}${endpoint}${endpoint.includes('?') ? '&' : '?'}token=${encodeURIComponent(token)}`;
     if (accountId) {
-      path += `&customerid=${accountId}`;
+      reqPath += `&customerid=${encodeURIComponent(accountId)}`;
     }
-    
+
     const options = {
       hostname: API_BASE,
-      path: path,
+      path: reqPath,
       method: method,
       headers: {
         'Accept': 'application/json'
       }
     };
-    
+
     if (data && method !== 'GET') {
-      const postData = JSON.stringify({ json: data });
       options.headers['Content-Type'] = 'application/x-www-form-urlencoded';
-      options.headers['Content-Length'] = Buffer.byteLength(postData);
     }
-    
+
     const req = https.request(options, (res) => {
       let responseData = '';
-      
+
       res.on('data', (chunk) => {
         responseData += chunk;
       });
-      
+
       res.on('end', () => {
         try {
           const parsed = JSON.parse(responseData);
-          
+
           if (res.statusCode >= 400) {
             const errorMsg = parsed.error || parsed.message || `HTTP ${res.statusCode}`;
             if (res.statusCode === 401) {
@@ -113,7 +132,7 @@ function apiRequest(method, endpoint, data = null, accountId = null) {
         }
       });
     });
-    
+
     req.on('error', (err) => {
       if (err.code === 'ENOTFOUND') {
         reject(new Error('Network error: Could not reach NodePing API. Check your internet connection.'));
@@ -123,14 +142,71 @@ function apiRequest(method, endpoint, data = null, accountId = null) {
         reject(new Error(`Network error: ${err.message}`));
       }
     });
-    
+
     if (data && method !== 'GET') {
-      req.write(`json=${encodeURIComponent(JSON.stringify(data))}`);
+      const postData = `json=${encodeURIComponent(JSON.stringify(data))}`;
+      req.write(postData);
     }
-    
+
     req.end();
   });
 }
+
+// ──── Account Name Resolution ────
+
+let _accountCache = null;
+
+async function getAccountMap() {
+  if (_accountCache) return _accountCache;
+  const accounts = await apiRequest('GET', '/accounts');
+  _accountCache = accounts;
+  return accounts;
+}
+
+/**
+ * Resolve an account name or ID to a customer ID.
+ * If the value looks like a NodePing ID (alphanumeric, 20+ chars), use it directly.
+ * Otherwise, search account names (case-insensitive).
+ */
+async function resolveAccountId(nameOrId) {
+  if (!nameOrId) return null;
+
+  // If it looks like a NodePing account ID (long alphanumeric), use directly
+  if (/^[A-Z0-9]{20,}$/i.test(nameOrId)) {
+    return nameOrId;
+  }
+
+  // Otherwise resolve by name
+  const accounts = await getAccountMap();
+  const needle = nameOrId.toLowerCase();
+
+  for (const [id, account] of Object.entries(accounts)) {
+    if (account.name && account.name.toLowerCase() === needle) {
+      return id;
+    }
+  }
+
+  // Try partial match
+  const partialMatches = [];
+  for (const [id, account] of Object.entries(accounts)) {
+    if (account.name && account.name.toLowerCase().includes(needle)) {
+      partialMatches.push({ id, name: account.name });
+    }
+  }
+
+  if (partialMatches.length === 1) {
+    return partialMatches[0].id;
+  }
+
+  if (partialMatches.length > 1) {
+    const names = partialMatches.map(m => `  ${m.name} (${m.id})`).join('\n');
+    throw new Error(`Ambiguous account name "${nameOrId}". Did you mean one of:\n${names}\n\nUse the full name or account ID.`);
+  }
+
+  throw new Error(`Account "${nameOrId}" not found. Run "nodeping accounts list" to see available accounts.`);
+}
+
+// ──── CLI Option Parsing ────
 
 function parseCliOptions(args, baseOptions = {}) {
   const optionSpecs = {
@@ -154,7 +230,17 @@ function parseCliOptions(args, baseOptions = {}) {
     '--method': { key: 'method', hasValue: true },
     '--status': { key: 'status', hasValue: true },
     '--port': { key: 'port', hasValue: true },
-    '--param': { key: 'params', hasValue: true, multi: true }
+    '--param': { key: 'params', hasValue: true, multi: true },
+    '--name': { key: 'name', hasValue: true },
+    '--email': { key: 'email', hasValue: true },
+    '--sms': { key: 'sms', hasValue: true },
+    '--webhook': { key: 'webhook', hasValue: true },
+    '--role': { key: 'role', hasValue: true },
+    '--data': { key: 'data', hasValue: true },
+    '--delay': { key: 'delay', hasValue: true },
+    '--schedule': { key: 'schedule', hasValue: true },
+    '--contact': { key: 'contacts', hasValue: true, multi: true },
+    '--location': { key: 'locations', hasValue: true, multi: true }
   };
 
   const options = Object.assign({
@@ -178,7 +264,17 @@ function parseCliOptions(args, baseOptions = {}) {
     method: null,
     status: null,
     port: null,
-    params: []
+    params: [],
+    name: null,
+    email: null,
+    sms: null,
+    webhook: null,
+    role: null,
+    data: null,
+    delay: null,
+    schedule: null,
+    contacts: [],
+    locations: []
   }, baseOptions);
 
   const positionals = [];
@@ -193,7 +289,7 @@ function parseCliOptions(args, baseOptions = {}) {
     const [flag, inlineValue] = arg.split('=', 2);
     const spec = optionSpecs[flag];
     if (!spec) {
-      throw new Error(`Unknown option: ${flag}`);
+      throw new Error(`Unknown option: ${flag}\nRun "nodeping --help" for usage information.`);
     }
 
     if (spec.hasValue) {
@@ -217,6 +313,8 @@ function parseCliOptions(args, baseOptions = {}) {
 
   return { options, positionals };
 }
+
+// ──── Normalization Utilities ────
 
 function normalizeEnable(value) {
   if (value === undefined || value === null) return null;
@@ -307,6 +405,8 @@ function normalizeTarget(target) {
   return normalizeUrl(String(target));
 }
 
+// ──── Check Payload Building ────
+
 function buildCheckPayloadFromOptions(options, isCreate = false) {
   const payload = {};
   if (options.label) payload.label = options.label;
@@ -331,6 +431,26 @@ function buildCheckPayloadFromOptions(options, isCreate = false) {
     payload.parameters = params;
   }
 
+  // Notification contacts
+  if (options.contacts && options.contacts.length > 0) {
+    const notifications = [];
+    for (const contactSpec of options.contacts) {
+      const parts = contactSpec.split(':');
+      const contactId = parts[0];
+      const delay = parts[1] ? parseInt(parts[1], 10) : (options.delay ? parseInt(options.delay, 10) : 0);
+      const schedule = parts[2] || options.schedule || 'All';
+      const entry = {};
+      entry[contactId] = { delay, schedule };
+      notifications.push(entry);
+    }
+    payload.notifications = notifications;
+  }
+
+  // Run locations
+  if (options.locations && options.locations.length > 0) {
+    payload.runlocations = options.locations;
+  }
+
   if (isCreate) {
     if (!payload.label) throw new Error('Missing required --label for check creation');
     if (!payload.type) throw new Error('Missing required --type for check creation');
@@ -342,38 +462,40 @@ function buildCheckPayloadFromOptions(options, isCreate = false) {
   return payload;
 }
 
-// List all checks or filter by pattern
+// ──── Check Operations ────
+
 async function listChecks(options = {}) {
-  const checks = await apiRequest('GET', '/checks', null, options.account);
-  
+  const accountId = await resolveAccountId(options.account);
+  const checks = await apiRequest('GET', '/checks', null, accountId);
+
   let checkList = Object.entries(checks).map(([id, check]) => ({
     id,
     ...check
   }));
-  
+
   // Apply filter if provided
   if (options.filter) {
     const pattern = new RegExp(options.filter, 'i');
-    checkList = checkList.filter(check => 
-      pattern.test(check.label) || 
+    checkList = checkList.filter(check =>
+      pattern.test(check.label) ||
       pattern.test(check.parameters?.target || '') ||
       pattern.test(check.type)
     );
   }
-  
+
   if (options.json) {
     console.log(JSON.stringify(checkList, null, 2));
     return checkList;
   }
-  
+
   // Human-readable output
   const accountNote = options.account ? ` (Account: ${options.account})` : '';
   console.log(`${colors.bright}${checkList.length} check(s) found${accountNote}${colors.reset}\n`);
-  
+
   checkList.forEach(check => {
     const status = check.state === 1 ? `${colors.green}PASS${colors.reset}` : `${colors.red}FAIL${colors.reset}`;
     const enabled = check.enable === 'active' ? `${colors.green}enabled${colors.reset}` : `${colors.gray}disabled${colors.reset}`;
-    
+
     console.log(`${colors.cyan}${check.id}${colors.reset}`);
     console.log(`  Label: ${colors.bright}${check.label}${colors.reset}`);
     console.log(`  Type: ${check.type}`);
@@ -384,34 +506,38 @@ async function listChecks(options = {}) {
     console.log(`  Interval: ${check.interval} min`);
     console.log('');
   });
-  
+
   return checkList;
 }
 
 async function createCheck(options = {}) {
+  const accountId = await resolveAccountId(options.account);
   const payload = buildCheckPayloadFromOptions(options, true);
-  const result = await apiRequest('POST', '/checks', payload, options.account);
+  const result = await apiRequest('POST', '/checks', payload, accountId);
   return { payload, result };
 }
 
 async function updateCheck(checkId, options = {}) {
+  const accountId = await resolveAccountId(options.account);
   const payload = buildCheckPayloadFromOptions(options, false);
   if (Object.keys(payload).length === 0) {
     throw new Error('No update fields provided. Use --label, --interval, --enable/--disable, or parameter flags.');
   }
-  const result = await apiRequest('PUT', `/checks/${checkId}`, payload, options.account);
+  const result = await apiRequest('PUT', `/checks/${checkId}`, payload, accountId);
   return { payload, result };
 }
 
 async function renameCheck(checkId, newLabel, options = {}) {
+  const accountId = await resolveAccountId(options.account);
   const payload = { label: newLabel };
-  const result = await apiRequest('PUT', `/checks/${checkId}`, payload, options.account);
+  const result = await apiRequest('PUT', `/checks/${checkId}`, payload, accountId);
   return { payload, result };
 }
 
 async function setCheckStatus(checkId, enableValue, options = {}) {
+  const accountId = await resolveAccountId(options.account);
   const payload = { enable: enableValue };
-  const result = await apiRequest('PUT', `/checks/${checkId}`, payload, options.account);
+  const result = await apiRequest('PUT', `/checks/${checkId}`, payload, accountId);
   return { payload, result };
 }
 
@@ -421,10 +547,11 @@ async function deleteCheck(checkId, force = false, account = null) {
     console.error(`${colors.yellow}Warning:${colors.reset} Use --force to confirm deletion`);
     return false;
   }
-  
+
   try {
-    const result = await apiRequest('DELETE', `/checks/${checkId}`, null, account);
-    
+    const accountId = await resolveAccountId(account);
+    const result = await apiRequest('DELETE', `/checks/${checkId}`, null, accountId);
+
     if (result.ok) {
       console.log(`${colors.green}✓${colors.reset} Deleted check: ${checkId}`);
       return true;
@@ -441,36 +568,36 @@ async function deleteCheck(checkId, force = false, account = null) {
 // Bulk delete checks by filter pattern
 async function bulkDelete(filter, options = {}) {
   const checks = await listChecks({ filter, json: true, account: options.account });
-  
+
   if (checks.length === 0) {
     console.log(`${colors.yellow}No checks found matching filter: ${filter}${colors.reset}`);
     return;
   }
-  
+
   console.log(`${colors.bright}Found ${checks.length} check(s) matching "${filter}"${colors.reset}\n`);
-  
+
   // Show what will be deleted
   checks.forEach(check => {
     console.log(`  ${colors.cyan}${check.id}${colors.reset} - ${check.label} (${check.type})`);
   });
-  
+
   console.log('');
-  
+
   if (options.dryRun) {
     console.log(`${colors.yellow}DRY RUN:${colors.reset} Would delete ${checks.length} check(s)`);
     console.log(`${colors.gray}Remove --dry-run and add --force to execute deletion${colors.reset}`);
     return;
   }
-  
+
   if (!options.force) {
     console.error(`${colors.red}Error:${colors.reset} Add --force to confirm bulk deletion of ${checks.length} check(s)`);
     process.exit(1);
   }
-  
+
   // Perform deletions
   let deleted = 0;
   let failed = 0;
-  
+
   for (const check of checks) {
     const success = await deleteCheck(check.id, true, options.account);
     if (success) {
@@ -479,7 +606,7 @@ async function bulkDelete(filter, options = {}) {
       failed++;
     }
   }
-  
+
   console.log('');
   console.log(`${colors.bright}Summary:${colors.reset}`);
   console.log(`  ${colors.green}Deleted: ${deleted}${colors.reset}`);
@@ -488,30 +615,34 @@ async function bulkDelete(filter, options = {}) {
   }
 }
 
-// List all subaccounts
+// ──── Account Operations ────
+
 async function listAccounts(options = {}) {
   try {
     const accounts = await apiRequest('GET', '/accounts');
-    
+
     if (options.json) {
       console.log(JSON.stringify(accounts, null, 2));
       return;
     }
-    
+
     // Human-readable output
     const accountList = Object.entries(accounts).map(([id, account]) => ({
       id,
       ...account
     }));
-    
+
     console.log(`${colors.bright}${accountList.length} account(s) found${colors.reset}\n`);
-    
+
     accountList.forEach(account => {
       const status = account.status === 'Active' ? `${colors.green}Active${colors.reset}` : `${colors.gray}${account.status}${colors.reset}`;
-      
+
       console.log(`${colors.cyan}${account.id}${colors.reset}`);
       console.log(`  Name: ${colors.bright}${account.name || 'Unnamed'}${colors.reset}`);
       console.log(`  Status: ${status}`);
+      if (account.count !== undefined) {
+        console.log(`  Checks: ${account.count}`);
+      }
       if (account.parent) {
         console.log(`  Parent Account: ${account.parent}`);
       }
@@ -523,28 +654,30 @@ async function listAccounts(options = {}) {
   }
 }
 
-// Get results for a check
+// ──── Results ────
+
 async function getResults(checkId, options = {}) {
+  const accountId = await resolveAccountId(options.account);
   const limit = options.limit || 10;
-  const results = await apiRequest('GET', `/results/${checkId}?limit=${limit}`, null, options.account);
-  
+  const results = await apiRequest('GET', `/results/${checkId}?limit=${limit}`, null, accountId);
+
   if (options.json) {
     console.log(JSON.stringify(results, null, 2));
     return;
   }
-  
+
   // Human-readable output
   const resultList = Array.isArray(results) ? results : [results];
-  
+
   console.log(`${colors.bright}Last ${resultList.length} result(s) for ${checkId}${colors.reset}\n`);
-  
+
   resultList.forEach(result => {
     // Handle nested doc structure from API
     const doc = result.doc || result;
     const status = doc.su ? `${colors.green}SUCCESS${colors.reset}` : `${colors.red}FAILURE${colors.reset}`;
     const timestamp = doc.s || doc.t;
     const date = new Date(timestamp);
-    
+
     console.log(`${colors.cyan}${date.toISOString()}${colors.reset}`);
     console.log(`  Status: ${status}`);
     console.log(`  Runtime: ${doc.rt}ms`);
@@ -557,6 +690,301 @@ async function getResults(checkId, options = {}) {
     console.log('');
   });
 }
+
+// ──── Contacts Operations ────
+
+async function listContacts(options = {}) {
+  const accountId = await resolveAccountId(options.account);
+  const contacts = await apiRequest('GET', '/contacts', null, accountId);
+
+  if (options.json) {
+    console.log(JSON.stringify(contacts, null, 2));
+    return contacts;
+  }
+
+  const contactList = Object.entries(contacts).map(([id, contact]) => ({
+    id,
+    ...contact
+  }));
+
+  const accountNote = options.account ? ` (Account: ${options.account})` : '';
+  console.log(`${colors.bright}${contactList.length} contact(s) found${accountNote}${colors.reset}\n`);
+
+  contactList.forEach(contact => {
+    console.log(`${colors.cyan}${contact.id}${colors.reset}`);
+    console.log(`  Name: ${colors.bright}${contact.name || 'Unnamed'}${colors.reset}`);
+    console.log(`  Role: ${contact.custrole || 'unknown'}`);
+
+    if (contact.addresses) {
+      const addresses = Object.entries(contact.addresses);
+      if (addresses.length > 0) {
+        console.log('  Addresses:');
+        addresses.forEach(([addrId, addr]) => {
+          const type = addr.type || 'email';
+          const address = addr.address || '';
+          // Mask sensitive addresses in display
+          const display = type === 'webhook'
+            ? `${address.substring(0, 30)}...`
+            : address;
+          console.log(`    ${colors.gray}[${addrId}]${colors.reset} ${type}: ${display}`);
+        });
+      }
+    }
+    console.log('');
+  });
+
+  return contactList;
+}
+
+async function getContact(contactId, options = {}) {
+  const accountId = await resolveAccountId(options.account);
+  const contact = await apiRequest('GET', `/contacts/${contactId}`, null, accountId);
+
+  if (options.json) {
+    console.log(JSON.stringify(contact, null, 2));
+    return contact;
+  }
+
+  console.log(`${colors.bright}Contact Details${colors.reset}\n`);
+  console.log(JSON.stringify(contact, null, 2));
+  return contact;
+}
+
+async function createContact(options = {}) {
+  const accountId = await resolveAccountId(options.account);
+
+  const payload = {};
+  if (options.name) payload.name = options.name;
+  if (options.role) {
+    const validRoles = ['owner', 'edit', 'view', 'notify'];
+    if (!validRoles.includes(options.role)) {
+      throw new Error(`Invalid role "${options.role}". Must be one of: ${validRoles.join(', ')}`);
+    }
+    payload.custrole = options.role;
+  } else {
+    payload.custrole = 'notify';
+  }
+
+  // Build new addresses
+  const newaddresses = [];
+  if (options.email) {
+    newaddresses.push({ address: options.email, type: 'email' });
+  }
+  if (options.sms) {
+    newaddresses.push({ address: options.sms, type: 'sms' });
+  }
+  if (options.webhook) {
+    newaddresses.push({ address: options.webhook, type: 'webhook', action: 'post' });
+  }
+  if (newaddresses.length > 0) {
+    payload.newaddresses = newaddresses;
+  }
+
+  if (!payload.name) {
+    throw new Error('Missing required --name for contact creation');
+  }
+
+  const result = await apiRequest('POST', '/contacts', payload, accountId);
+  return result;
+}
+
+async function updateContact(contactId, options = {}) {
+  const accountId = await resolveAccountId(options.account);
+
+  const payload = {};
+  if (options.name) payload.name = options.name;
+  if (options.role) {
+    const validRoles = ['owner', 'edit', 'view', 'notify'];
+    if (!validRoles.includes(options.role)) {
+      throw new Error(`Invalid role "${options.role}". Must be one of: ${validRoles.join(', ')}`);
+    }
+    payload.custrole = options.role;
+  }
+
+  // Build new addresses to add
+  const newaddresses = [];
+  if (options.email) {
+    newaddresses.push({ address: options.email, type: 'email' });
+  }
+  if (options.sms) {
+    newaddresses.push({ address: options.sms, type: 'sms' });
+  }
+  if (options.webhook) {
+    newaddresses.push({ address: options.webhook, type: 'webhook', action: 'post' });
+  }
+  if (newaddresses.length > 0) {
+    payload.newaddresses = newaddresses;
+  }
+
+  if (Object.keys(payload).length === 0) {
+    throw new Error('No update fields provided. Use --name, --role, --email, --sms, or --webhook.');
+  }
+
+  const result = await apiRequest('PUT', `/contacts/${contactId}`, payload, accountId);
+  return result;
+}
+
+async function deleteContact(contactId, options = {}) {
+  if (!options.force) {
+    console.error(`${colors.yellow}Warning:${colors.reset} Use --force to confirm contact deletion`);
+    return false;
+  }
+
+  const accountId = await resolveAccountId(options.account);
+  const result = await apiRequest('DELETE', `/contacts/${contactId}`, null, accountId);
+
+  if (result.ok || result.id) {
+    console.log(`${colors.green}✓${colors.reset} Deleted contact: ${contactId}`);
+    return true;
+  } else {
+    console.error(`${colors.red}✗${colors.reset} Failed to delete contact: ${contactId}`);
+    return false;
+  }
+}
+
+// ──── Schedules Operations ────
+
+async function listSchedules(options = {}) {
+  const accountId = await resolveAccountId(options.account);
+  const schedules = await apiRequest('GET', '/schedules', null, accountId);
+
+  if (options.json) {
+    console.log(JSON.stringify(schedules, null, 2));
+    return schedules;
+  }
+
+  const scheduleNames = Object.keys(schedules);
+  const accountNote = options.account ? ` (Account: ${options.account})` : '';
+  console.log(`${colors.bright}${scheduleNames.length} schedule(s) found${accountNote}${colors.reset}\n`);
+
+  scheduleNames.forEach(name => {
+    const schedule = schedules[name];
+    console.log(`${colors.cyan}${name}${colors.reset}`);
+    const days = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
+    days.forEach(day => {
+      if (schedule[day]) {
+        const d = schedule[day];
+        let status;
+        if (d.disabled) {
+          status = `${colors.gray}disabled${colors.reset}`;
+        } else if (d.allday) {
+          status = `${colors.green}all day${colors.reset}`;
+        } else {
+          const excludeNote = d.exclude ? ' (exclude)' : '';
+          status = `${d.time1} - ${d.time2}${excludeNote}`;
+        }
+        console.log(`  ${day.padEnd(10)}: ${status}`);
+      }
+    });
+    console.log('');
+  });
+
+  return schedules;
+}
+
+async function getSchedule(scheduleId, options = {}) {
+  const accountId = await resolveAccountId(options.account);
+  const schedule = await apiRequest('GET', `/schedules/${scheduleId}`, null, accountId);
+
+  if (options.json) {
+    console.log(JSON.stringify(schedule, null, 2));
+    return schedule;
+  }
+
+  console.log(`${colors.bright}Schedule: ${scheduleId}${colors.reset}\n`);
+  console.log(JSON.stringify(schedule, null, 2));
+  return schedule;
+}
+
+async function createSchedule(scheduleId, options = {}) {
+  const accountId = await resolveAccountId(options.account);
+
+  if (!options.data) {
+    throw new Error('Missing required --data <json> for schedule creation.\nExample: --data \'{"data":{"monday":{"allday":true},...}}\'');
+  }
+
+  let data;
+  try {
+    data = JSON.parse(options.data);
+  } catch (err) {
+    throw new Error(`Invalid JSON for --data: ${err.message}`);
+  }
+
+  const result = await apiRequest('PUT', `/schedules/${scheduleId}`, data, accountId);
+  return result;
+}
+
+async function deleteSchedule(scheduleId, options = {}) {
+  if (!options.force) {
+    console.error(`${colors.yellow}Warning:${colors.reset} Use --force to confirm schedule deletion`);
+    return false;
+  }
+
+  const accountId = await resolveAccountId(options.account);
+  const result = await apiRequest('DELETE', `/schedules/${scheduleId}`, null, accountId);
+
+  if (result.ok || result === 'OK' || (typeof result === 'object' && !result.error)) {
+    console.log(`${colors.green}✓${colors.reset} Deleted schedule: ${scheduleId}`);
+    return true;
+  } else {
+    console.error(`${colors.red}✗${colors.reset} Failed to delete schedule: ${scheduleId}`);
+    return false;
+  }
+}
+
+// ──── Account Info ────
+
+async function showInfo(options = {}) {
+  const accountId = await resolveAccountId(options.account);
+
+  // Gather info
+  const [accounts, contacts, schedules, checks] = await Promise.all([
+    apiRequest('GET', '/accounts').catch(() => ({})),
+    apiRequest('GET', '/contacts', null, accountId).catch(() => ({})),
+    apiRequest('GET', '/schedules', null, accountId).catch(() => ({})),
+    apiRequest('GET', '/checks', null, accountId).catch(() => ({}))
+  ]);
+
+  const info = {
+    accounts: Object.keys(accounts).length,
+    contacts: Object.keys(contacts).length,
+    schedules: Object.keys(schedules).length,
+    checks: Object.keys(checks).length,
+    accountDetails: accounts,
+    currentScope: accountId || 'primary'
+  };
+
+  if (options.json) {
+    console.log(JSON.stringify(info, null, 2));
+    return;
+  }
+
+  const accountNote = options.account ? ` (Account: ${options.account})` : '';
+  console.log(`${colors.bright}NodePing Account Summary${accountNote}${colors.reset}\n`);
+  console.log(`  Subaccounts: ${info.accounts}`);
+  console.log(`  Contacts:    ${info.contacts}`);
+  console.log(`  Schedules:   ${info.schedules}`);
+  console.log(`  Checks:      ${info.checks}`);
+
+  // Show check type breakdown
+  const typeCount = {};
+  Object.values(checks).forEach(check => {
+    const type = check.type || 'UNKNOWN';
+    typeCount[type] = (typeCount[type] || 0) + 1;
+  });
+
+  if (Object.keys(typeCount).length > 0) {
+    console.log(`\n  ${colors.bright}Check Types:${colors.reset}`);
+    Object.entries(typeCount)
+      .sort((a, b) => b[1] - a[1])
+      .forEach(([type, count]) => {
+        console.log(`    ${type.padEnd(12)} ${count}`);
+      });
+  }
+  console.log('');
+}
+
+// ──── Sync Operations ────
 
 function readJsonFile(filePath) {
   const raw = fs.readFileSync(filePath, 'utf8');
@@ -810,11 +1238,12 @@ async function applySync(options) {
   }
 
   const plan = await planSync(options);
+  const accountId = await resolveAccountId(options.account);
   const results = { created: [], updated: [], disabled: [], deleted: [] };
 
   for (const entry of plan.create) {
     const payload = buildPayloadFromDesiredCheck(entry.desired, options.normalize);
-    const result = await apiRequest('POST', '/checks', payload, options.account);
+    const result = await apiRequest('POST', '/checks', payload, accountId);
     results.created.push({ payload, result });
   }
 
@@ -826,150 +1255,24 @@ async function applySync(options) {
     if (entry.changes.enable) payload.enable = entry.changes.enable;
     if (entry.changes.parameters) payload.parameters = entry.changes.parameters;
 
-    const result = await apiRequest('PUT', `/checks/${entry.id}`, payload, options.account);
+    const result = await apiRequest('PUT', `/checks/${entry.id}`, payload, accountId);
     results.updated.push({ id: entry.id, payload, result });
   }
 
   for (const entry of plan.disable) {
-    const result = await apiRequest('PUT', `/checks/${entry.id}`, { enable: 'inactive' }, options.account);
+    const result = await apiRequest('PUT', `/checks/${entry.id}`, { enable: 'inactive' }, accountId);
     results.disabled.push({ id: entry.id, result });
   }
 
   for (const entry of plan.delete) {
-    const result = await apiRequest('DELETE', `/checks/${entry.id}`, null, options.account);
+    const result = await apiRequest('DELETE', `/checks/${entry.id}`, null, accountId);
     results.deleted.push({ id: entry.id, result });
   }
 
   return { plan, results };
 }
 
-// Print usage information
-function printUsage() {
-  console.log(`${colors.bright}NodePing CLI v${VERSION}${colors.reset}
-
-${colors.bright}Usage:${colors.reset}
-  nodeping
-  nodeping checks list [--filter PATTERN] [--account ID] [--json]
-  nodeping checks delete <id> [--force] [--account ID]
-  nodeping checks delete --filter PATTERN [--dry-run] [--force] [--account ID]
-  nodeping checks create --type TYPE --label LABEL --target TARGET [options]
-  nodeping checks update <id> [options]
-  nodeping checks enable <id> [--account ID]
-  nodeping checks disable <id> [--account ID]
-  nodeping checks rename <id> <newLabel> [--account ID]
-  nodeping accounts list [--json]
-  nodeping results <check-id> [--limit N] [--json] [--account ID]
-  nodeping sync plan --desired <file> [--normalize] [--json] [--account ID]
-  nodeping sync apply --desired <file> [--normalize] --force [--account ID]
-  nodeping tui
-  nodeping --version
-  nodeping --help
-
-${colors.bright}Commands:${colors.reset}
-  ${colors.cyan}(no args)${colors.reset}               Launch the interactive TUI menu
-  ${colors.cyan}checks list${colors.reset}              List all monitoring checks
-  ${colors.cyan}checks delete <id>${colors.reset}       Delete a specific check by ID
-  ${colors.cyan}checks delete --filter${colors.reset}   Bulk delete checks matching pattern
-  ${colors.cyan}checks create${colors.reset}            Create a new check (HTTP, AUDIO)
-  ${colors.cyan}checks update <id>${colors.reset}       Update label/interval/params for a check
-  ${colors.cyan}checks enable <id>${colors.reset}       Enable a check
-  ${colors.cyan}checks disable <id>${colors.reset}      Disable a check
-  ${colors.cyan}checks rename <id>${colors.reset}       Rename a check label
-  ${colors.cyan}accounts list${colors.reset}            List all subaccounts
-  ${colors.cyan}results <id>${colors.reset}             Show recent results for a check
-  ${colors.cyan}sync plan${colors.reset}                Diff desired checks against current state
-  ${colors.cyan}sync apply${colors.reset}               Apply planned changes (requires --force)
-  ${colors.cyan}tui${colors.reset}                      Launch the interactive TUI
-
-${colors.bright}Options:${colors.reset}
-  ${colors.cyan}--filter PATTERN${colors.reset}        Filter checks by label, target, or type (regex)
-  ${colors.cyan}--account ID${colors.reset}            Use a specific subaccount (customerid)
-  ${colors.cyan}--dry-run${colors.reset}               Preview bulk deletion without executing
-  ${colors.cyan}--force${colors.reset}                 Confirm deletion (required for delete operations)
-  ${colors.cyan}--json${colors.reset}                  Output in JSON format
-  ${colors.cyan}--limit N${colors.reset}               Limit number of results (default: 10)
-  ${colors.cyan}--label LABEL${colors.reset}           Check label (create/update)
-  ${colors.cyan}--type TYPE${colors.reset}             Check type (HTTP, AUDIO, etc.)
-  ${colors.cyan}--target TARGET${colors.reset}         Check target (URL/host)
-  ${colors.cyan}--interval N${colors.reset}            Check interval in minutes
-  ${colors.cyan}--enable${colors.reset}                Enable a check (create/update)
-  ${colors.cyan}--disable${colors.reset}               Disable a check (create/update)
-  ${colors.cyan}--threshold N${colors.reset}           AUDIO threshold parameter
-  ${colors.cyan}--sensitivity N${colors.reset}         AUDIO sensitivity parameter
-  ${colors.cyan}--method METHOD${colors.reset}         HTTP method (GET, HEAD)
-  ${colors.cyan}--status CODE${colors.reset}           HTTP expected status code
-  ${colors.cyan}--port N${colors.reset}                Port override for target
-  ${colors.cyan}--param key=value${colors.reset}       Extra parameter (repeatable)
-  ${colors.cyan}--desired FILE${colors.reset}          Desired checks JSON for sync
-  ${colors.cyan}--current FILE${colors.reset}          Current checks JSON (offline sync)
-  ${colors.cyan}--normalize${colors.reset}             Normalize targets for sync comparison
-  ${colors.cyan}--version${colors.reset}               Show version number
-  ${colors.cyan}--help${colors.reset}                  Show this help message
-
-${colors.bright}Authentication:${colors.reset}
-  API token must be stored in: ${colors.cyan}~/.credentials/nodeping/api_token${colors.reset}
-  Get your token from: ${colors.blue}https://nodeping.com/account.html${colors.reset}
-
-${colors.bright}Examples:${colors.reset}
-  ${colors.gray}# List all checks${colors.reset}
-  nodeping checks list
-
-  ${colors.gray}# List checks for a subaccount${colors.reset}
-  nodeping checks list --account 20240822231045J30GEH
-
-  ${colors.gray}# List all subaccounts${colors.reset}
-  nodeping accounts list
-
-  ${colors.gray}# List checks matching "SR"${colors.reset}
-  nodeping checks list --filter "SR"
-
-  ${colors.gray}# Preview bulk deletion${colors.reset}
-  nodeping checks delete --filter "SR" --dry-run
-
-  ${colors.gray}# Execute bulk deletion${colors.reset}
-  nodeping checks delete --filter "SR" --force
-
-  ${colors.gray}# Delete a single check${colors.reset}
-  nodeping checks delete 201205050153W2Q4C-0J2HSIRF --force
-
-  ${colors.gray}# Get recent results${colors.reset}
-  nodeping results 201205050153W2Q4C-0J2HSIRF --limit 5
-
-  ${colors.gray}# Create an HTTP check${colors.reset}
-  nodeping checks create --type HTTP --label "Homepage" --target https://example.com --interval 5
-
-  ${colors.gray}# Create an AUDIO check${colors.reset}
-  nodeping checks create --type AUDIO --label "Stream" --target https://stream.example.com/live --interval 5 --threshold 15 --sensitivity 3
-
-  ${colors.gray}# Update a check label and interval${colors.reset}
-  nodeping checks update 201205050153W2Q4C-0J2HSIRF --label "New Label" --interval 10
-
-  ${colors.gray}# Sync plan from desired state${colors.reset}
-  nodeping sync plan --desired examples/desired-checks.example.json --normalize
-
-  ${colors.gray}# Apply sync changes (requires --force)${colors.reset}
-  nodeping sync apply --desired examples/desired-checks.example.json --normalize --force
-`);
-}
-
-function printTuiHelp() {
-  console.log(`NodePing TUI
-
-Usage:
-  nodeping
-  nodeping tui
-
-Keys:
-  ↑/↓    Move selection
-  Enter  Select menu item
-  q      Back / quit
-  Ctrl+C Quit
-`);
-}
-
-function clearScreen() {
-  process.stdout.write('\x1b[2J\x1b[H');
-}
+// ──── Display Utilities ────
 
 function stripAnsi(text) {
   return String(text).replace(/[\u001B\u009B][[\]()#;?]*(?:(?:(?:\d{1,4}(?:;\d{0,4})*)?[\dA-PR-TZcf-ntqry=><~])|(?:[a-zA-Z]))/g, '');
@@ -989,6 +1292,10 @@ function truncateText(text, maxLength) {
   return `${chars.slice(0, maxLength - 1).join('')}…`;
 }
 
+function clearScreen() {
+  process.stdout.write('\x1b[2J\x1b[H');
+}
+
 function setRawMode(enabled) {
   if (process.stdin.isTTY && typeof process.stdin.setRawMode === 'function') {
     process.stdin.setRawMode(enabled);
@@ -997,6 +1304,7 @@ function setRawMode(enabled) {
 
 function printChecksTable(checks, heading = 'Checks') {
   console.log(`${colors.bright}${heading}${colors.reset}`);
+
   if (!checks || checks.length === 0) {
     console.log(`${colors.yellow}No checks found.${colors.reset}`);
     return;
@@ -1029,6 +1337,8 @@ function printChecksTable(checks, heading = 'Checks') {
   rows.forEach((row) => console.log(formatRow(row)));
   console.log('');
 }
+
+// ──── TUI Functions ────
 
 async function promptLine(questionText, defaultValue = '') {
   const wasRaw = Boolean(process.stdin.isTTY && process.stdin.isRaw);
@@ -1210,13 +1520,14 @@ async function actionViewRecentResults(accountId) {
   clearScreen();
   const countText = await promptLine('How many checks to scan for recent results', '10');
   const count = Math.max(1, parseInt(countText, 10) || 10);
+  const resolvedId = await resolveAccountId(accountId);
   const checks = await listChecks({ json: true, account: accountId });
   const limitedChecks = checks.slice(0, count);
   const rows = [];
 
   for (const check of limitedChecks) {
     try {
-      const result = await apiRequest('GET', `/results/${check.id}?limit=1`, null, accountId);
+      const result = await apiRequest('GET', `/results/${check.id}?limit=1`, null, resolvedId);
       const doc = parseLatestResult(result);
       const status = doc?.su ? `${colors.green}SUCCESS${colors.reset}` : `${colors.red}FAIL${colors.reset}`;
       const runtime = doc?.rt !== undefined ? `${doc.rt}` : '';
@@ -1305,11 +1616,155 @@ async function runTui() {
   await runInkTui();
 }
 
-// Main CLI router
+// ──── Help Text ────
+
+function printUsage() {
+  console.log(`${colors.bright}NodePing CLI v${VERSION}${colors.reset}
+Command-line interface for the NodePing monitoring API.
+
+${colors.bright}Usage:${colors.reset}
+  nodeping <command> <subcommand> [options]
+
+${colors.bright}Commands:${colors.reset}
+  ${colors.cyan}checks${colors.reset}
+    list [--filter PATTERN] [--account ID|NAME] [--json]
+    create --type TYPE --label LABEL --target TARGET [--interval N] [--account ID|NAME]
+    update <id> [--label L] [--interval N] [--enable|--disable] [--account ID|NAME]
+    delete <id> [--force] [--account ID|NAME]
+    delete --filter PATTERN [--dry-run] [--force] [--account ID|NAME]
+    enable <id> [--account ID|NAME]
+    disable <id> [--account ID|NAME]
+    rename <id> <newLabel> [--account ID|NAME]
+
+  ${colors.cyan}contacts${colors.reset}
+    list [--account ID|NAME] [--json]
+    get <id> [--account ID|NAME] [--json]
+    create --name NAME [--email E] [--sms N] [--webhook URL] [--role ROLE] [--account ID|NAME]
+    update <id> [--name NAME] [--email E] [--role ROLE] [--account ID|NAME]
+    delete <id> --force [--account ID|NAME]
+
+  ${colors.cyan}schedules${colors.reset}
+    list [--account ID|NAME] [--json]
+    get <id> [--account ID|NAME] [--json]
+    create <id> --data <json> [--account ID|NAME]
+    delete <id> --force [--account ID|NAME]
+
+  ${colors.cyan}accounts${colors.reset}
+    list [--json]
+
+  ${colors.cyan}results${colors.reset} <check-id> [--limit N] [--json] [--account ID|NAME]
+
+  ${colors.cyan}info${colors.reset} [--account ID|NAME] [--json]
+
+  ${colors.cyan}sync${colors.reset}
+    plan --desired <file> [--normalize] [--json] [--account ID|NAME]
+    apply --desired <file> [--normalize] --force [--account ID|NAME]
+
+  ${colors.cyan}tui${colors.reset}                      Launch interactive TUI
+
+${colors.bright}Global Options:${colors.reset}
+  --account ID|NAME   Use a subaccount (by ID or name, e.g., "My Account")
+  --json              Output in JSON format
+  --force             Confirm destructive operations
+  --dry-run           Preview bulk operations without executing
+  --version           Show version
+  --help              Show this help
+
+${colors.bright}Check Options:${colors.reset}
+  --label LABEL       Check label
+  --type TYPE         Check type (HTTP, AUDIO, PING, DNS, SSL, PORT, etc.)
+  --target TARGET     Check target (URL, hostname, IP)
+  --interval N        Check interval in minutes
+  --enable/--disable  Set check status
+  --threshold N       AUDIO threshold parameter
+  --sensitivity N     AUDIO sensitivity parameter
+  --method METHOD     HTTP method (GET, HEAD, POST)
+  --status CODE       Expected HTTP status code
+  --port N            Port number
+  --param key=value   Extra parameter (repeatable)
+  --contact ID[:DELAY[:SCHEDULE]]  Notification contact (repeatable)
+  --location LOC      Run location (repeatable, e.g., nam, eur)
+
+${colors.bright}Contact Options:${colors.reset}
+  --name NAME         Contact display name
+  --email ADDRESS     Email notification address
+  --sms NUMBER        SMS notification number
+  --webhook URL       Webhook notification URL
+  --role ROLE         Contact role (owner, edit, view, notify)
+
+${colors.bright}Schedule Options:${colors.reset}
+  --data JSON         Schedule data as JSON string
+
+${colors.bright}Authentication:${colors.reset}
+  API token: ${colors.cyan}~/.credentials/nodeping/api_token${colors.reset}
+  Get token: ${colors.blue}https://nodeping.com/account.html${colors.reset}
+
+${colors.bright}Examples:${colors.reset}
+  ${colors.gray}# List all checks${colors.reset}
+  nodeping checks list
+
+  ${colors.gray}# List checks for a named subaccount${colors.reset}
+  nodeping checks list --account "My Company"
+
+  ${colors.gray}# Create an HTTP check${colors.reset}
+  nodeping checks create --type HTTP --label "Homepage" --target https://example.com --interval 5
+
+  ${colors.gray}# Create a PING check${colors.reset}
+  nodeping checks create --type PING --label "Server" --target 192.168.1.1
+
+  ${colors.gray}# Create a DNS check${colors.reset}
+  nodeping checks create --type DNS --label "DNS" --target example.com --param contentstring=93.184.216.34
+
+  ${colors.gray}# Create an SSL check${colors.reset}
+  nodeping checks create --type SSL --label "SSL Cert" --target example.com --param warningdays=30
+
+  ${colors.gray}# Create a PORT check${colors.reset}
+  nodeping checks create --type PORT --label "SSH" --target example.com --port 22
+
+  ${colors.gray}# Preview bulk deletion${colors.reset}
+  nodeping checks delete --filter "test-" --dry-run --account "My Company"
+
+  ${colors.gray}# List contacts${colors.reset}
+  nodeping contacts list --account "My Company"
+
+  ${colors.gray}# Create a contact${colors.reset}
+  nodeping contacts create --name "Ops Team" --email ops@example.com --role notify
+
+  ${colors.gray}# View notification schedules${colors.reset}
+  nodeping schedules list
+
+  ${colors.gray}# Get account summary${colors.reset}
+  nodeping info --account "My Company"
+
+  ${colors.gray}# Get results${colors.reset}
+  nodeping results CHECK_ID --limit 5
+
+  ${colors.gray}# Sync checks from desired state${colors.reset}
+  nodeping sync plan --desired desired-checks.json --normalize
+`);
+}
+
+function printTuiHelp() {
+  console.log(`NodePing TUI
+
+Usage:
+  nodeping
+  nodeping tui
+
+Keys:
+  ↑/↓    Move selection
+  Enter  Select menu item
+  q      Back / quit
+  Ctrl+C Quit
+`);
+}
+
+// ──── Main CLI Router ────
+
 async function main() {
   const args = process.argv.slice(2);
   const command = args[0];
-  
+
   if (args.length === 0) {
     try {
       await runTui();
@@ -1319,7 +1774,7 @@ async function main() {
       process.exit(1);
     }
   }
-  
+
   if (args.includes('--version') || args.includes('-v')) {
     console.log(`nodeping v${VERSION}`);
     process.exit(0);
@@ -1330,11 +1785,13 @@ async function main() {
     process.exit(0);
   }
   const subcommand = args[1];
-  
+
   try {
+    // ── Checks ──
     if (command === 'checks' && subcommand === 'list') {
       const { options } = parseCliOptions(args.slice(2));
       await listChecks(options);
+
     } else if (command === 'checks' && subcommand === 'delete') {
       const { options, positionals } = parseCliOptions(args.slice(2));
       const checkId = positionals[0];
@@ -1347,6 +1804,7 @@ async function main() {
         console.error(`${colors.red}Error:${colors.reset} Specify a check ID or use --filter for bulk deletion`);
         process.exit(1);
       }
+
     } else if (command === 'checks' && subcommand === 'create') {
       const { options } = parseCliOptions(args.slice(2));
       const result = await createCheck(options);
@@ -1359,7 +1817,11 @@ async function main() {
         if (result.payload.parameters?.target) {
           console.log(`  Target: ${result.payload.parameters.target}`);
         }
+        if (result.result?._id) {
+          console.log(`  ID: ${result.result._id}`);
+        }
       }
+
     } else if (command === 'checks' && subcommand === 'update') {
       const { options, positionals } = parseCliOptions(args.slice(2));
       const checkId = positionals[0];
@@ -1373,6 +1835,7 @@ async function main() {
       } else {
         console.log(`${colors.green}✓${colors.reset} Updated check: ${checkId}`);
       }
+
     } else if (command === 'checks' && subcommand === 'rename') {
       const { options, positionals } = parseCliOptions(args.slice(2));
       const checkId = positionals[0];
@@ -1388,6 +1851,7 @@ async function main() {
         console.log(`${colors.green}✓${colors.reset} Renamed check: ${checkId}`);
         console.log(`  New label: ${newLabel}`);
       }
+
     } else if (command === 'checks' && subcommand === 'enable') {
       const { options, positionals } = parseCliOptions(args.slice(2));
       const checkId = positionals[0];
@@ -1401,6 +1865,7 @@ async function main() {
       } else {
         console.log(`${colors.green}✓${colors.reset} Enabled check: ${checkId}`);
       }
+
     } else if (command === 'checks' && subcommand === 'disable') {
       const { options, positionals } = parseCliOptions(args.slice(2));
       const checkId = positionals[0];
@@ -1414,9 +1879,98 @@ async function main() {
       } else {
         console.log(`${colors.green}✓${colors.reset} Disabled check: ${checkId}`);
       }
+
+    // ── Contacts ──
+    } else if (command === 'contacts' && subcommand === 'list') {
+      const { options } = parseCliOptions(args.slice(2));
+      await listContacts(options);
+
+    } else if (command === 'contacts' && subcommand === 'get') {
+      const { options, positionals } = parseCliOptions(args.slice(2));
+      const contactId = positionals[0];
+      if (!contactId) {
+        console.error(`${colors.red}Error:${colors.reset} Specify a contact ID`);
+        process.exit(1);
+      }
+      await getContact(contactId, options);
+
+    } else if (command === 'contacts' && subcommand === 'create') {
+      const { options } = parseCliOptions(args.slice(2));
+      const result = await createContact(options);
+      if (options.json) {
+        console.log(JSON.stringify(result, null, 2));
+      } else {
+        console.log(`${colors.green}✓${colors.reset} Created contact`);
+        if (result._id) console.log(`  ID: ${result._id}`);
+        if (result.name) console.log(`  Name: ${result.name}`);
+      }
+
+    } else if (command === 'contacts' && subcommand === 'update') {
+      const { options, positionals } = parseCliOptions(args.slice(2));
+      const contactId = positionals[0];
+      if (!contactId) {
+        console.error(`${colors.red}Error:${colors.reset} Specify a contact ID to update`);
+        process.exit(1);
+      }
+      const result = await updateContact(contactId, options);
+      if (options.json) {
+        console.log(JSON.stringify(result, null, 2));
+      } else {
+        console.log(`${colors.green}✓${colors.reset} Updated contact: ${contactId}`);
+      }
+
+    } else if (command === 'contacts' && subcommand === 'delete') {
+      const { options, positionals } = parseCliOptions(args.slice(2));
+      const contactId = positionals[0];
+      if (!contactId) {
+        console.error(`${colors.red}Error:${colors.reset} Specify a contact ID to delete`);
+        process.exit(1);
+      }
+      await deleteContact(contactId, options);
+
+    // ── Schedules ──
+    } else if (command === 'schedules' && subcommand === 'list') {
+      const { options } = parseCliOptions(args.slice(2));
+      await listSchedules(options);
+
+    } else if (command === 'schedules' && subcommand === 'get') {
+      const { options, positionals } = parseCliOptions(args.slice(2));
+      const scheduleId = positionals[0];
+      if (!scheduleId) {
+        console.error(`${colors.red}Error:${colors.reset} Specify a schedule name/ID`);
+        process.exit(1);
+      }
+      await getSchedule(scheduleId, options);
+
+    } else if (command === 'schedules' && subcommand === 'create') {
+      const { options, positionals } = parseCliOptions(args.slice(2));
+      const scheduleId = positionals[0];
+      if (!scheduleId) {
+        console.error(`${colors.red}Error:${colors.reset} Specify a schedule name/ID`);
+        process.exit(1);
+      }
+      const result = await createSchedule(scheduleId, options);
+      if (options.json) {
+        console.log(JSON.stringify(result, null, 2));
+      } else {
+        console.log(`${colors.green}✓${colors.reset} Created/updated schedule: ${scheduleId}`);
+      }
+
+    } else if (command === 'schedules' && subcommand === 'delete') {
+      const { options, positionals } = parseCliOptions(args.slice(2));
+      const scheduleId = positionals[0];
+      if (!scheduleId) {
+        console.error(`${colors.red}Error:${colors.reset} Specify a schedule name/ID to delete`);
+        process.exit(1);
+      }
+      await deleteSchedule(scheduleId, options);
+
+    // ── Accounts ──
     } else if (command === 'accounts' && subcommand === 'list') {
       const { options } = parseCliOptions(args.slice(2));
       await listAccounts(options);
+
+    // ── Results ──
     } else if (command === 'results') {
       const { options, positionals } = parseCliOptions(args.slice(1));
       const checkId = positionals[0];
@@ -1425,6 +1979,13 @@ async function main() {
         process.exit(1);
       }
       await getResults(checkId, options);
+
+    // ── Info ──
+    } else if (command === 'info') {
+      const { options } = parseCliOptions(args.slice(1));
+      await showInfo(options);
+
+    // ── Sync ──
     } else if (command === 'sync' && (subcommand === 'plan' || subcommand === 'apply')) {
       const { options } = parseCliOptions(args.slice(2));
       if (subcommand === 'plan') {
@@ -1492,12 +2053,15 @@ async function main() {
           console.log(`  Deleted: ${summary.delete.length}`);
         }
       }
+
+    // ── TUI ──
     } else if (command === 'tui') {
       if (args.includes('--help') || args.includes('-h')) {
         printTuiHelp();
         process.exit(0);
       }
       await runTui();
+
     } else {
       console.error(`${colors.red}Error:${colors.reset} Unknown command: ${command} ${subcommand || ''}`);
       console.error(`Run ${colors.cyan}nodeping --help${colors.reset} for usage information`);
