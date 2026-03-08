@@ -32,7 +32,7 @@ cat ~/.credentials/nodeping/api_token
 # Navigate to your NodePing CLI installation directory
 cd /path/to/nodeping-cli
 ./nodeping --version
-# Expected: nodeping v1.1.0
+# Expected: nodeping v2.0.0
 
 ./nodeping --help
 # Should show usage information
@@ -120,7 +120,7 @@ cat << EOF > ~/sr-station-cleanup-audit/sr-cleanup-summary-$TIMESTAMP.md
 
 **Date**: $(date)
 **Executed by**: $(whoami)
-**Tool**: NodePing CLI v1.0.0
+**Tool**: NodePing CLI v2.0.0
 
 ## Results
 

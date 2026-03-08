@@ -1023,7 +1023,7 @@ function App(props) {
 
   if (screen === 'main') {
     return React.createElement(MenuScreen, {
-      title: 'NodePing CLI v1.3.0',
+      title: 'NodePing CLI v2.0.0',
       subtitle: accountText,
       items: [
         { label: 'Checks', value: 'checks' },

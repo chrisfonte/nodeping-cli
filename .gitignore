@@ -20,3 +20,11 @@ Thumbs.db
 # Test output
 test-output/
 *.log
+
+# Internal working documents (not part of the public project)
+PRODUCTION_READY_SUMMARY.md
+PROJECT_SUMMARY.md
+prompts/
+specs/
+codex-prompts/
+codex-prompt-tui-rebuild.md
